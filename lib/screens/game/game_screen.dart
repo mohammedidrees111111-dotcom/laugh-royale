@@ -569,21 +569,32 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   }
 
   void _endGame({required bool won, required String reason}) {
-    if (_gameOver || _gameEnding) return;
+    debugPrint('[ENDGAME] ENTER won=$won reason=$reason gameOver_before=$_gameOver gameEnding_before=$_gameEnding');
+    if (_gameOver || _gameEnding) {
+      debugPrint('[ENDGAME] BLOCKED — already ending (gameOver=$_gameOver gameEnding=$_gameEnding)');
+      return;
+    }
     _gameEnding = true;
     _gameOver = true;
+    debugPrint('[ENDGAME] Stopping camera...');
     _camera?.stopImageStream();
+    debugPrint('[ENDGAME] Cancelling timers...');
     _faceTimer?.cancel();
     _countdownTimer?.cancel();
+    debugPrint('[ENDGAME] Stopping detector...');
     _detector.stop();
     _winner = won ? 'You' : widget.opponentName;
+    debugPrint('[ENDGAME] Winner set: $_winner');
 
     LobbyService.saveGameResult(won: won, opponent: widget.opponentName);
+    debugPrint('[ENDGAME] Score saved');
 
     GameSyncService.dispose();
     FaceShareService.dispose();
+    debugPrint('[ENDGAME] Services disposed. mounted=$mounted');
 
     if (mounted) {
+      debugPrint('[ENDGAME] Navigating to GameOverScreen...');
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
           builder: (_) => GameOverScreen(
