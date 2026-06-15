@@ -301,6 +301,9 @@ wss.on('connection', (ws, req) => {
           const r = rooms.get(cs.roomCode);
           if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
           const target = cs.role === 'host' ? r.guest : r.host;
+          if (msg.type === 'event' && msg.event === 'laughed') {
+            log('LAUGH', `sender=${cs.role}[${cs.playerId}] target=${cs.role === 'host' ? 'guest' : 'host'}[${cs.role === 'host' ? r.guestId : r.hostId}] same=${target === ws} room=${cs.roomCode}`);
+          }
           if (target && target.readyState === WebSocket.OPEN) send(target, msg);
         }
         break;

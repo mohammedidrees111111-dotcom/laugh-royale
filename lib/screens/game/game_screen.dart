@@ -245,7 +245,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           _mySmile = smile;
           if (smile > 0.40 && !_iLaughed) {
             _iLaughed = true;
-            debugPrint('[SMILE] LAUGH DETECTED! smile=$smile threshold=0.40');
+            debugPrint('[SMILE] SELF LAUGH myId=$_myId won=false');
             if (widget.isLocal) {
               LocalGameService.sendGameEvent('laughed');
               _endGame(won: false, reason: 'player_laughed');
@@ -456,6 +456,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         }
       } else if (type == 'event') {
         final evt = msg['event'] as String?;
+        debugPrint('[EVENT] Received: $evt myId=$_myId');
         if (evt == 'laughed' || evt == 'you_won') {
           if (!_gameOver) { _endGame(won: true, reason: 'opponent_laughed'); }
         } else if (evt == 'you_lost' && !_gameOver) {
