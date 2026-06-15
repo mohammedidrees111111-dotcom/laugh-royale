@@ -1,6 +1,7 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../l10n/localization.dart';
+import '../../config/app_config.dart';
 import '../../services/auth_service.dart';
 import '../../services/firebase_service.dart';
 import '../../services/lobby_service.dart';
@@ -31,7 +32,10 @@ class _LobbyScreenState extends State<LobbyScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadStats());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadStats();
+      AppConfig.detectLocalIp();
+    });
   }
 
   Future<void> _loadStats() async {
@@ -170,12 +174,11 @@ class _LobbyScreenState extends State<LobbyScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Server Unreachable'),
         content: const Text(
-          'Cannot connect to game server.\n\n'
-          'Make sure:\n'
-          '  1. The server is running\n'
-          '  2. Both devices are on the same network\n'
-          '  3. The server IP is correct\n\n'
-          'Try Local WiFi mode instead.',
+          'Could not reach the game server.\n\n'
+          'This may be because:\n'
+          '  1. Render server is waking up (retry in 30s)\n'
+          '  2. No internet connection\n\n'
+          'Try again or use Local WiFi mode.',
         ),
         actions: [
           TextButton(
@@ -359,13 +362,13 @@ class _LobbyScreenState extends State<LobbyScreen> {
                   child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFFFF6584)),
                 ),
                 const SizedBox(height: 20),
-                const Text('SEARCHING WORLDWIDE',
+                const Text('CONNECTING TO SERVER',
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 2)),
                 const SizedBox(height: 8),
-                const Text('Waiting for another player...',
+                const Text('Waking up game server...',
                     style: TextStyle(color: Colors.white54, fontSize: 13)),
                 const SizedBox(height: 4),
-                const Text('Will keep searching until found',
+                const Text('This may take up to 45 seconds on first try',
                     style: TextStyle(color: Colors.white30, fontSize: 11)),
                 const SizedBox(height: 20),
                 OutlinedButton(

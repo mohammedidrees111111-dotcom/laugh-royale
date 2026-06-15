@@ -52,24 +52,37 @@ class WsGameService {
 
   static Future<bool> tryConnect({String? url, List<String>? urls, int retries = 0}) async {
     final maxRetries = retries > 0 ? retries : AppConfig.wsMaxRetries;
-
-    final candidates = urls ?? (url != null ? [url] : [AppConfig.wsServerUrl]);
+    final candidates = urls ?? (url != null ? [url] : AppConfig.candidateWsUrls);
 
     for (final candidate in candidates) {
-      debugPrint('[WS] Trying $candidate (max $maxRetries retries per URL)');
+      debugPrint('[WS] === Trying $candidate ===');
 
-      for (int attempt = 0; attempt < maxRetries; attempt++) {
-        if (attempt > 0) {
-          debugPrint('[WS] Retry $attempt/$maxRetries in ${AppConfig.wsRetryDelay.inSeconds}s...');
-          await Future.delayed(AppConfig.wsRetryDelay);
+      final isProduction = candidate.contains('onrender.com');
+
+      if (isProduction) {
+        debugPrint('[WS] Warming up Render server (health check)...');
+        for (int warmup = 0; warmup < 12; warmup++) {
+          final alive = await AppConfig.checkServerHealth(url: candidate);
+          if (alive) {
+            debugPrint('[WS] Render server is awake (warmup ${warmup + 1})');
+            break;
+          }
+          if (warmup < 11) {
+            debugPrint('[WS] Render cold start, waiting 5s...');
+            await Future.delayed(const Duration(seconds: 5));
+          }
         }
+      }
 
+      int attemptsLeft = maxRetries;
+      while (attemptsLeft > 0) {
+        final attempt = maxRetries - attemptsLeft + 1;
         try {
           _disposeSocket();
           _ws = await WebSocket.connect(candidate)
               .timeout(AppConfig.wsConnectTimeout);
 
-          debugPrint('[WS] Connected to $candidate (attempt ${attempt + 1})');
+          debugPrint('[WS] ✅ Connected to $candidate');
           _connected = true;
 
           _ws!.listen(
@@ -78,7 +91,6 @@ class WsGameService {
               debugPrint('[WS] Connection closed by server');
               _connected = false;
               _inQueue = false;
-              _statusController.add(WsMatchStatus.connectionFailed);
             },
             onError: (e) {
               debugPrint('[WS] Connection error: $e');
@@ -90,24 +102,34 @@ class WsGameService {
           _startPing();
           return true;
         } on SocketException catch (e) {
-          debugPrint('[WS] SocketException $candidate attempt ${attempt + 1}: $e');
+          debugPrint('[WS] ❌ $candidate refused connection: $e');
+          attemptsLeft = 0;
         } on TimeoutException {
-          debugPrint('[WS] Connection timeout $candidate attempt ${attempt + 1}');
+          debugPrint('[WS] ⏳ $candidate timed out (attempt $attempt)');
+          attemptsLeft--;
+          if (attemptsLeft > 0) {
+            debugPrint('[WS] Retrying in ${AppConfig.wsRetryDelay.inSeconds}s...');
+            await Future.delayed(AppConfig.wsRetryDelay);
+          }
         } on WebSocketException catch (e) {
-          debugPrint('[WS] WebSocketException $candidate attempt ${attempt + 1}: $e');
+          debugPrint('[WS] WebSocket error $candidate: $e');
+          attemptsLeft--;
+          if (attemptsLeft > 0) {
+            await Future.delayed(AppConfig.wsRetryDelay);
+          }
         } catch (e) {
-          debugPrint('[WS] Unexpected error $candidate attempt ${attempt + 1}: $e');
-        }
-
-        if (attempt < maxRetries - 1) {
-          debugPrint('[WS] Will retry $candidate...');
+          debugPrint('[WS] Unexpected error $candidate: $e');
+          attemptsLeft--;
+          if (attemptsLeft > 0) {
+            await Future.delayed(AppConfig.wsRetryDelay);
+          }
         }
       }
 
-      debugPrint('[WS] All attempts to $candidate failed, trying next URL...');
+      debugPrint('[WS] Failed to connect to $candidate');
     }
 
-    debugPrint('[WS] All URLs and all retries exhausted');
+    debugPrint('[WS] ❌ All URLs exhausted — server unreachable');
     _connected = false;
     _statusController.add(WsMatchStatus.connectionFailed);
     return false;

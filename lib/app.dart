@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'config/app_config.dart';
 import 'config/theme.dart';
 import 'l10n/localization.dart';
 import 'screens/home_screen.dart';
@@ -46,6 +47,9 @@ class _LaughRoyaleAppState extends State<LaughRoyaleApp> {
 
       final fbOk = await FirebaseService.safeInitialize();
       debugPrint('APP: Firebase initialized → $fbOk');
+
+      AppConfig.checkServerHealth(url: AppConfig.candidateWsUrls.first)
+          .then((ok) => debugPrint('APP: Server warmup → ${ok ? "OK" : "sleeping"}'));
 
       _isLoggedIn = await AuthService.restoreSession();
     } catch (e, stack) {

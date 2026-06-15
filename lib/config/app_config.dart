@@ -33,6 +33,8 @@ class AppConfig {
       candidates.add(_overrideWsUrl!);
     }
 
+    candidates.add(_productionUrl);
+
     if (kIsWeb) {
       candidates.add('ws://localhost:3000');
     } else if (Platform.isAndroid) {
@@ -49,8 +51,6 @@ class AppConfig {
       final subnet = localIp.substring(0, localIp.lastIndexOf('.'));
       candidates.add('ws://$subnet.1:3000');
     }
-
-    candidates.add(_productionUrl);
 
     return candidates;
   }
