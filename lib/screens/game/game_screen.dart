@@ -259,6 +259,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
               _endGame(won: false, reason: 'player_laughed');
             } else {
               GameSyncService.iLaughed(matchId: _matchId, myId: _myId);
+              _endGame(won: false, reason: 'player_laughed');
             }
           }
         });
