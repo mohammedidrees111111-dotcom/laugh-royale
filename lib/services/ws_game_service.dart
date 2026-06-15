@@ -203,7 +203,12 @@ class WsGameService {
       _startPing();
 
       if (_roomCode != null && _playerId != null) {
-        debugPrint('[WS] Resuming in room $_roomCode');
+        debugPrint('[WS] Reconnecting to room $_roomCode as $_playerId');
+        _send({
+          'type': 'reconnect',
+          'playerId': _playerId,
+          'roomCode': _roomCode,
+        });
       } else if (_inQueue && _playerId != null) {
         debugPrint('[WS] Rejoining matchmaking queue');
         _send({
@@ -444,6 +449,22 @@ class WsGameService {
       final msg = jsonDecode(data as String) as Map<String, dynamic>;
       final type = msg['type'] as String?;
       debugPrint('[WS] ← $type');
+
+      if (type == 'reconnected') {
+        _roomCode = msg['roomId'] as String?;
+        _playerRole = msg['role'] as String?;
+        _opponentId = msg['opponentId'] as String?;
+        _opponentName = msg['opponentName'] as String?;
+        _connected = true;
+        _inQueue = false;
+        _reconnectAttempts = 0;
+        debugPrint('[WS] Session recovered: room $_roomCode, role $_playerRole');
+      }
+
+      if (type == 'opponent_disconnected') {
+        debugPrint('[WS] Opponent disconnected — waiting for reconnect');
+      }
+
       _controller.add(msg);
     } catch (e) {
       debugPrint('[WS] Failed to parse message: $e');

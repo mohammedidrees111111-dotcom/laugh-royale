@@ -432,6 +432,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           _endGame(won: false, reason: 'player_laughed');
         } else if (evt == 'quit') {
           if (!_gameOver) _endGame(won: true, reason: 'opponent_quit');
+        } else if (evt == 'opponent_disconnected') {
+          setState(() => _oppStatus = 'Reconnecting...');
+        } else if (evt == 'opponent_reconnected') {
+          setState(() => _oppStatus = 'Ready');
         } else if (evt != null && evt.startsWith('sound_')) {
           final soundIdx = int.tryParse(evt.substring(6)) ?? -1;
           if (soundIdx >= 0) GameSoundService.play(soundIdx);

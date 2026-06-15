@@ -48,11 +48,24 @@ function cleanupRoom(ws) {
 
   const other = (cs.role === 'host') ? room.guest : room.host;
   if (other && other.readyState === WebSocket.OPEN) {
-    send(other, { type: 'opponent_left' });
+    send(other, { type: 'opponent_disconnected' });
   }
-  const age = ((Date.now() - (room.createdAt || Date.now())) / 1000).toFixed(0);
-  rooms.delete(cs.roomCode);
-  log('ROOM', `Room ${cs.roomCode} closed (age: ${age}s)`);
+
+  setTimeout(() => {
+    const currentRoom = rooms.get(cs.roomCode);
+    if (!currentRoom) return;
+
+    const hostAlive = currentRoom.host && currentRoom.host.readyState === WebSocket.OPEN;
+    const guestAlive = currentRoom.guest && currentRoom.guest.readyState === WebSocket.OPEN;
+
+    if (!hostAlive && !guestAlive) {
+      const age = ((Date.now() - (currentRoom.createdAt || Date.now())) / 1000).toFixed(0);
+      rooms.delete(cs.roomCode);
+      log('ROOM', `Room ${cs.roomCode} expired (age: ${age}s, both left)`);
+    }
+  }, 30000);
+
+  log('ROOM', `Player ${cs.role} left room ${cs.roomCode} (reconnect window: 30s)`);
 }
 
 // ── Pair two queued players into a room ────────────────────
@@ -180,6 +193,64 @@ wss.on('connection', (ws, req) => {
       case 'matchmaking_leave':
         removeFromQueue(ws);
         send(ws, { type: 'queue_left' });
+        break;
+
+      // ── Session recovery ─────────────────────────────────
+      case 'reconnect':
+        {
+          const pid = msg.playerId;
+          const rid = msg.roomCode;
+
+          if (!pid || !rid) {
+            send(ws, { type: 'error', message: 'Missing playerId or roomCode' });
+            return;
+          }
+
+          const room = rooms.get(rid);
+          if (!room) {
+            send(ws, { type: 'error', message: 'Room not found' });
+            log('RECONNECT', `Room ${rid} not found for ${pid}`);
+            return;
+          }
+
+          removeFromQueue(ws);
+
+          if (room.hostId === pid) {
+            room.host = ws;
+            cs.role = 'host';
+            cs.playerId = pid;
+            cs.roomCode = rid;
+            if (room.guest && room.guest.readyState === WebSocket.OPEN) {
+              send(room.guest, { type: 'opponent_reconnected' });
+            }
+            send(ws, {
+              type: 'reconnected',
+              roomId: rid,
+              role: 'host',
+              opponentId: room.guestId,
+              opponentName: room.guestId,
+            });
+            log('RECONNECT', `Host ${pid} reconnected to room ${rid}`);
+          } else if (room.guestId === pid) {
+            room.guest = ws;
+            cs.role = 'guest';
+            cs.playerId = pid;
+            cs.roomCode = rid;
+            if (room.host && room.host.readyState === WebSocket.OPEN) {
+              send(room.host, { type: 'opponent_reconnected' });
+            }
+            send(ws, {
+              type: 'reconnected',
+              roomId: rid,
+              role: 'guest',
+              opponentId: room.hostId,
+              opponentName: room.hostId,
+            });
+            log('RECONNECT', `Guest ${pid} reconnected to room ${rid}`);
+          } else {
+            send(ws, { type: 'error', message: 'Not a member of this room' });
+          }
+        }
         break;
 
       // ── Room hosting (manual code sharing) ──────────────
