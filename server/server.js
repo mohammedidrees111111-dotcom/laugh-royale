@@ -4,14 +4,11 @@ const WebSocket = require('ws');
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
 
-// ── Game rooms (relay host↔guest messages) ─────────────────
 const rooms = new Map();
-
-// ── Matchmaking queue ──────────────────────────────────────
 const matchmakingQueue = [];
-const connStateMap = new Map(); // ws → { roomCode, role, playerId, playerName }
+const connStateMap = new Map();
+const roomCleanupTimers = new Map();
 
-// ── Helpers ────────────────────────────────────────────────
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -27,6 +24,11 @@ function log(level, ...args) {
 function send(ws, obj) {
   if (ws.readyState !== WebSocket.OPEN) return;
   try { ws.send(JSON.stringify(obj)); } catch (_) {}
+}
+
+function cancelCleanupTimer(roomCode) {
+  const t = roomCleanupTimers.get(roomCode);
+  if (t) { clearTimeout(t); roomCleanupTimers.delete(roomCode); }
 }
 
 function removeFromQueue(ws) {
@@ -46,29 +48,30 @@ function cleanupRoom(ws) {
   const room = rooms.get(cs.roomCode);
   if (!room) return;
 
+  const roomCode = cs.roomCode;
   const other = (cs.role === 'host') ? room.guest : room.host;
   if (other && other.readyState === WebSocket.OPEN) {
     send(other, { type: 'opponent_disconnected' });
   }
 
-  setTimeout(() => {
-    const currentRoom = rooms.get(cs.roomCode);
+  cancelCleanupTimer(roomCode);
+  const timer = setTimeout(() => {
+    const currentRoom = rooms.get(roomCode);
     if (!currentRoom) return;
-
     const hostAlive = currentRoom.host && currentRoom.host.readyState === WebSocket.OPEN;
     const guestAlive = currentRoom.guest && currentRoom.guest.readyState === WebSocket.OPEN;
-
     if (!hostAlive && !guestAlive) {
       const age = ((Date.now() - (currentRoom.createdAt || Date.now())) / 1000).toFixed(0);
-      rooms.delete(cs.roomCode);
-      log('ROOM', `Room ${cs.roomCode} expired (age: ${age}s, both left)`);
+      rooms.delete(roomCode);
+      roomCleanupTimers.delete(roomCode);
+      log('ROOM', `Room ${roomCode} expired (age: ${age}s, both left)`);
     }
   }, 30000);
+  roomCleanupTimers.set(roomCode, timer);
 
-  log('ROOM', `Player ${cs.role} left room ${cs.roomCode} (reconnect window: 30s)`);
+  log('ROOM', `Player ${cs.role} left room ${roomCode} (reconnect window: 30s)`);
 }
 
-// ── Pair two queued players into a room ────────────────────
 function tryPair() {
   while (matchmakingQueue.length >= 2) {
     const p1 = matchmakingQueue.shift();
@@ -99,28 +102,14 @@ function tryPair() {
       createdAt: Date.now(),
     });
 
-    send(p1, {
-      type: 'matched',
-      roomId: roomCode,
-      opponentId: c2.playerId,
-      opponentName: c2.playerName,
-      role: 'host',
-    });
-
-    send(p2, {
-      type: 'matched',
-      roomId: roomCode,
-      opponentId: c1.playerId,
-      opponentName: c1.playerName,
-      role: 'guest',
-    });
+    send(p1, { type: 'matched', roomId: roomCode, opponentId: c2.playerId, opponentName: c2.playerName, role: 'host' });
+    send(p2, { type: 'matched', roomId: roomCode, opponentId: c1.playerId, opponentName: c1.playerName, role: 'guest' });
 
     log('MATCH', `Paired ${c1.playerName}[${c1.playerId}] vs ${c2.playerName}[${c2.playerId}] in room ${roomCode}`);
     log('QUEUE', `Queue size: ${matchmakingQueue.length}`);
   }
 }
 
-// ── HTTP health-check server ───────────────────────────────
 const httpServer = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -149,7 +138,6 @@ const httpServer = http.createServer((req, res) => {
   res.end();
 });
 
-// ── WebSocket server ───────────────────────────────────────
 const wss = new WebSocket.Server({ server: httpServer });
 
 wss.on('connection', (ws, req) => {
@@ -163,9 +151,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw);
-    } catch (e) {
+    try { msg = JSON.parse(raw); } catch (e) {
       log('ERROR', 'Invalid JSON received');
       send(ws, { type: 'error', message: 'Invalid message format' });
       return;
@@ -175,11 +161,9 @@ wss.on('connection', (ws, req) => {
 
     switch (msg.type) {
 
-      // ── Matchmaking ──────────────────────────────────────
       case 'matchmaking_join':
         if (cs.roomCode || matchmakingQueue.includes(ws)) {
           send(ws, { type: 'error', message: 'Already in queue or room' });
-          log('QUEUE', `Rejected duplicate join from ${msg.name || '?'}`);
           return;
         }
         cs.playerId = msg.id || 'unknown';
@@ -195,27 +179,37 @@ wss.on('connection', (ws, req) => {
         send(ws, { type: 'queue_left' });
         break;
 
-      // ── Session recovery ─────────────────────────────────
       case 'reconnect':
         {
           const pid = msg.playerId;
           const rid = msg.roomCode;
-
           if (!pid || !rid) {
             send(ws, { type: 'error', message: 'Missing playerId or roomCode' });
             return;
           }
 
-          const room = rooms.get(rid);
-          if (!room) {
-            send(ws, { type: 'error', message: 'Room not found' });
-            log('RECONNECT', `Room ${rid} not found for ${pid}`);
+          if (cs.roomCode) {
+            send(ws, { type: 'reconnected', roomId: cs.roomCode, role: cs.role,
+              opponentId: cs.role === 'host' ? (rooms.get(cs.roomCode)?.guestId) : (rooms.get(cs.roomCode)?.hostId) });
             return;
           }
 
+          const room = rooms.get(rid);
+          if (!room) {
+            send(ws, { type: 'error', message: 'Room expired' });
+            log('RECONNECT', `Room ${rid} expired, ${pid} too late`);
+            return;
+          }
+
+          cancelCleanupTimer(rid);
           removeFromQueue(ws);
 
           if (room.hostId === pid) {
+            const oldWs = room.host;
+            if (oldWs && oldWs !== ws && oldWs.readyState !== WebSocket.OPEN) {
+              try { oldWs.terminate(); } catch (_) {}
+              connStateMap.delete(oldWs);
+            }
             room.host = ws;
             cs.role = 'host';
             cs.playerId = pid;
@@ -223,15 +217,15 @@ wss.on('connection', (ws, req) => {
             if (room.guest && room.guest.readyState === WebSocket.OPEN) {
               send(room.guest, { type: 'opponent_reconnected' });
             }
-            send(ws, {
-              type: 'reconnected',
-              roomId: rid,
-              role: 'host',
-              opponentId: room.guestId,
-              opponentName: room.guestId,
-            });
+            send(ws, { type: 'reconnected', roomId: rid, role: 'host',
+              opponentId: room.guestId, opponentName: room.guestId });
             log('RECONNECT', `Host ${pid} reconnected to room ${rid}`);
           } else if (room.guestId === pid) {
+            const oldWs = room.guest;
+            if (oldWs && oldWs !== ws && oldWs.readyState !== WebSocket.OPEN) {
+              try { oldWs.terminate(); } catch (_) {}
+              connStateMap.delete(oldWs);
+            }
             room.guest = ws;
             cs.role = 'guest';
             cs.playerId = pid;
@@ -239,13 +233,8 @@ wss.on('connection', (ws, req) => {
             if (room.host && room.host.readyState === WebSocket.OPEN) {
               send(room.host, { type: 'opponent_reconnected' });
             }
-            send(ws, {
-              type: 'reconnected',
-              roomId: rid,
-              role: 'guest',
-              opponentId: room.hostId,
-              opponentName: room.hostId,
-            });
+            send(ws, { type: 'reconnected', roomId: rid, role: 'guest',
+              opponentId: room.hostId, opponentName: room.hostId });
             log('RECONNECT', `Guest ${pid} reconnected to room ${rid}`);
           } else {
             send(ws, { type: 'error', message: 'Not a member of this room' });
@@ -253,7 +242,6 @@ wss.on('connection', (ws, req) => {
         }
         break;
 
-      // ── Room hosting (manual code sharing) ──────────────
       case 'host':
         if (cs.roomCode) {
           send(ws, { type: 'error', message: 'Already in a room' });
@@ -264,11 +252,7 @@ wss.on('connection', (ws, req) => {
         cs.role = 'host';
         cs.playerId = msg.id || 'host';
         rooms.set(cs.roomCode, {
-          host: ws,
-          guest: null,
-          hostId: cs.playerId,
-          guestId: null,
-          createdAt: Date.now(),
+          host: ws, guest: null, hostId: cs.playerId, guestId: null, createdAt: Date.now(),
         });
         send(ws, { type: 'room_created', code: cs.roomCode });
         log('ROOM', `Created ${cs.roomCode} by host ${cs.playerId}`);
@@ -280,33 +264,23 @@ wss.on('connection', (ws, req) => {
           return;
         }
         removeFromQueue(ws);
-
-        const joinCode = msg.code;
-        const room = rooms.get(joinCode);
-        if (!room) {
-          send(ws, { type: 'error', message: 'Room not found' });
-          log('JOIN', `Room ${joinCode} not found for ${msg.id || '?'}`);
-          return;
+        {
+          const jc = msg.code;
+          const jr = rooms.get(jc);
+          if (!jr) { send(ws, { type: 'error', message: 'Room not found' }); return; }
+          if (jr.guest) { send(ws, { type: 'error', message: 'Room is full' }); return; }
+          cs.roomCode = jc;
+          cs.role = 'guest';
+          cs.playerId = msg.id || 'guest';
+          cs.playerName = msg.name || 'Player';
+          jr.guest = ws;
+          jr.guestId = cs.playerId;
+          send(jr.host, { type: 'player_joined', id: cs.playerId, name: cs.playerName });
+          send(ws, { type: 'joined', id: jr.hostId, name: jr.hostId });
+          log('JOIN', `Player ${cs.playerId} joined room ${jc}`);
         }
-        if (room.guest) {
-          send(ws, { type: 'error', message: 'Room is full' });
-          log('JOIN', `Room ${joinCode} full, rejected ${msg.id || '?'}`);
-          return;
-        }
-
-        cs.roomCode = joinCode;
-        cs.role = 'guest';
-        cs.playerId = msg.id || 'guest';
-        cs.playerName = msg.name || 'Player';
-        room.guest = ws;
-        room.guestId = cs.playerId;
-
-        send(room.host, { type: 'player_joined', id: cs.playerId, name: cs.playerName });
-        send(ws, { type: 'joined', id: room.hostId, name: room.hostId });
-        log('JOIN', `Player ${cs.playerId} joined room ${joinCode}`);
         break;
 
-      // ── Game events (forward to opponent) ───────────────
       case 'start':
         {
           const r = rooms.get(cs.roomCode);
@@ -325,29 +299,18 @@ wss.on('connection', (ws, req) => {
       case 'event':
         {
           const r = rooms.get(cs.roomCode);
-          if (!r) {
-            send(ws, { type: 'error', message: 'Not in a room' });
-            return;
-          }
+          if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
           const target = cs.role === 'host' ? r.guest : r.host;
-          if (target && target.readyState === WebSocket.OPEN) {
-            send(target, msg);
-          }
+          if (target && target.readyState === WebSocket.OPEN) send(target, msg);
         }
         break;
 
       default:
-        // Forward unknown types too (backward compatible)
         {
           const r = rooms.get(cs.roomCode);
-          if (!r) {
-            send(ws, { type: 'error', message: 'Not in a room' });
-            return;
-          }
+          if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
           const target = cs.role === 'host' ? r.guest : r.host;
-          if (target && target.readyState === WebSocket.OPEN) {
-            send(target, msg);
-          }
+          if (target && target.readyState === WebSocket.OPEN) send(target, msg);
         }
     }
   });
@@ -356,7 +319,7 @@ wss.on('connection', (ws, req) => {
     removeFromQueue(ws);
     cleanupRoom(ws);
     connStateMap.delete(ws);
-    log('DISCONNECT', `Client from ${clientIp} disconnected (rooms: ${rooms.size}, queue: ${matchmakingQueue.length})`);
+    log('DISCONNECT', `Client disconnected (rooms: ${rooms.size}, queue: ${matchmakingQueue.length})`);
   });
 
   ws.on('error', (err) => {
@@ -365,8 +328,7 @@ wss.on('connection', (ws, req) => {
 });
 
 httpServer.listen(PORT, HOST, () => {
-  log('START', `Laugh Royale server running on http://${HOST}:${PORT}`);
-  log('START', `WebSocket endpoint: ws://${HOST}:${PORT}`);
-  log('START', `Health check:     http://${HOST}:${PORT}/health`);
-  log('START', `Matchmaking:      active (queue-based pairing)`);
+  log('START', `Server running on http://${HOST}:${PORT}`);
+  log('START', `Health check: http://${HOST}:${PORT}/health`);
+  log('START', `Matchmaking: active (queue-based pairing)`);
 });

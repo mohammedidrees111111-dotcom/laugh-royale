@@ -32,6 +32,7 @@ class WsGameService {
   static Timer? _reconnectTimer;
   static int _reconnectAttempts = 0;
   static const int _maxReconnectAttempts = 5;
+  static bool _isReconnecting = false;
 
   static bool get isConnected => _connected;
   static String? get roomCode => _roomCode;
@@ -157,23 +158,24 @@ class WsGameService {
   // ── Auto-reconnect ──────────────────────────────────────────
 
   static void _onDisconnected() {
-    if (_cancelled) return;
+    if (_cancelled || _isReconnecting) return;
     if (_reconnectAttempts >= _maxReconnectAttempts) {
       debugPrint('[WS] Max reconnect attempts reached');
       _statusController.add(WsMatchStatus.connectionFailed);
       return;
     }
 
+    _isReconnecting = true;
     _reconnectAttempts++;
     final delay = Duration(seconds: 2 * _reconnectAttempts);
-    debugPrint('[WS] Scheduling reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts in ${delay.inSeconds}s');
+    debugPrint('[WS] Scheduling reconnect $_reconnectAttempts/$_maxReconnectAttempts in ${delay.inSeconds}s');
 
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(delay, () => _attemptReconnect());
   }
 
   static Future<void> _attemptReconnect() async {
-    if (_cancelled) return;
+    if (_cancelled) { _isReconnecting = false; return; }
 
     final url = _lastConnectedUrl ?? AppConfig.wsServerUrl;
     debugPrint('[WS] Reconnecting to $url...');
@@ -185,6 +187,7 @@ class WsGameService {
       debugPrint('[WS] Reconnected!');
       _connected = true;
       _reconnectAttempts = 0;
+      _isReconnecting = false;
 
       _ws!.listen(
         _onMessage,
@@ -216,9 +219,12 @@ class WsGameService {
           'id': _playerId,
           'name': _opponentName ?? 'Player',
         });
+      } else {
+        debugPrint('[WS] No session to resume');
       }
     } catch (e) {
       debugPrint('[WS] Reconnect failed: $e');
+      _isReconnecting = false;
       _onDisconnected();
     }
   }
@@ -519,6 +525,7 @@ class WsGameService {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _reconnectAttempts = 0;
+    _isReconnecting = false;
     _lastConnectedUrl = null;
     _playerRole = null;
     _opponentId = null;
