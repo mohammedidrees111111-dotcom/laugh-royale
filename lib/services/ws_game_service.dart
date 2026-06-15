@@ -50,59 +50,64 @@ class WsGameService {
     return ok;
   }
 
-  static Future<bool> tryConnect({String? url, int retries = 0}) async {
+  static Future<bool> tryConnect({String? url, List<String>? urls, int retries = 0}) async {
     final maxRetries = retries > 0 ? retries : AppConfig.wsMaxRetries;
-    final serverUrl = url ?? AppConfig.wsServerUrl;
 
-    debugPrint('[WS] Attempting connection to $serverUrl (max $maxRetries retries)');
+    final candidates = urls ?? (url != null ? [url] : [AppConfig.wsServerUrl]);
 
-    for (int attempt = 0; attempt < maxRetries; attempt++) {
-      if (attempt > 0) {
-        debugPrint('[WS] Retry $attempt/$maxRetries in ${AppConfig.wsRetryDelay.inSeconds}s...');
-        await Future.delayed(AppConfig.wsRetryDelay);
+    for (final candidate in candidates) {
+      debugPrint('[WS] Trying $candidate (max $maxRetries retries per URL)');
+
+      for (int attempt = 0; attempt < maxRetries; attempt++) {
+        if (attempt > 0) {
+          debugPrint('[WS] Retry $attempt/$maxRetries in ${AppConfig.wsRetryDelay.inSeconds}s...');
+          await Future.delayed(AppConfig.wsRetryDelay);
+        }
+
+        try {
+          _disposeSocket();
+          _ws = await WebSocket.connect(candidate)
+              .timeout(AppConfig.wsConnectTimeout);
+
+          debugPrint('[WS] Connected to $candidate (attempt ${attempt + 1})');
+          _connected = true;
+
+          _ws!.listen(
+            _onMessage,
+            onDone: () {
+              debugPrint('[WS] Connection closed by server');
+              _connected = false;
+              _inQueue = false;
+              _statusController.add(WsMatchStatus.connectionFailed);
+            },
+            onError: (e) {
+              debugPrint('[WS] Connection error: $e');
+              _connected = false;
+              _inQueue = false;
+            },
+          );
+
+          _startPing();
+          return true;
+        } on SocketException catch (e) {
+          debugPrint('[WS] SocketException $candidate attempt ${attempt + 1}: $e');
+        } on TimeoutException {
+          debugPrint('[WS] Connection timeout $candidate attempt ${attempt + 1}');
+        } on WebSocketException catch (e) {
+          debugPrint('[WS] WebSocketException $candidate attempt ${attempt + 1}: $e');
+        } catch (e) {
+          debugPrint('[WS] Unexpected error $candidate attempt ${attempt + 1}: $e');
+        }
+
+        if (attempt < maxRetries - 1) {
+          debugPrint('[WS] Will retry $candidate...');
+        }
       }
 
-      try {
-        _disposeSocket();
-        _ws = await WebSocket.connect(serverUrl)
-            .timeout(AppConfig.wsConnectTimeout);
-
-        debugPrint('[WS] Connected to $serverUrl (attempt ${attempt + 1})');
-        _connected = true;
-
-        _ws!.listen(
-          _onMessage,
-          onDone: () {
-            debugPrint('[WS] Connection closed by server');
-            _connected = false;
-            _inQueue = false;
-            _statusController.add(WsMatchStatus.connectionFailed);
-          },
-          onError: (e) {
-            debugPrint('[WS] Connection error: $e');
-            _connected = false;
-            _inQueue = false;
-          },
-        );
-
-        _startPing();
-        return true;
-      } on SocketException catch (e) {
-        debugPrint('[WS] SocketException attempt ${attempt + 1}: $e');
-      } on TimeoutException {
-        debugPrint('[WS] Connection timeout attempt ${attempt + 1}');
-      } on WebSocketException catch (e) {
-        debugPrint('[WS] WebSocketException attempt ${attempt + 1}: $e');
-      } catch (e) {
-        debugPrint('[WS] Unexpected error attempt ${attempt + 1}: $e');
-      }
-
-      if (attempt < maxRetries - 1) {
-        debugPrint('[WS] Will retry...');
-      }
+      debugPrint('[WS] All attempts to $candidate failed, trying next URL...');
     }
 
-    debugPrint('[WS] All $maxRetries connection attempts to $serverUrl failed');
+    debugPrint('[WS] All URLs and all retries exhausted');
     _connected = false;
     _statusController.add(WsMatchStatus.connectionFailed);
     return false;
@@ -134,7 +139,7 @@ class WsGameService {
     debugPrint('[WS] Player: $playerName ($playerId)');
     debugPrint('[WS] Server URL: ${serverUrl ?? AppConfig.wsServerUrl}');
 
-    final connected = await tryConnect(url: serverUrl);
+    final connected = await tryConnect(urls: AppConfig.candidateWsUrls);
     if (!connected) {
       debugPrint('[WS] Cannot connect to server — matchmaking aborted');
       return null;

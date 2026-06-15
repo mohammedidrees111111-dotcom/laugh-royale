@@ -26,7 +26,7 @@ class AppConfig {
     _overrideWsUrl = _productionUrl;
   }
 
-  static List<String> get _candidateWsUrls {
+  static List<String> get candidateWsUrls {
     final candidates = <String>[];
 
     if (_overrideWsUrl != null) {
@@ -55,7 +55,7 @@ class AppConfig {
     return candidates;
   }
 
-  static String get wsServerUrl => _candidateWsUrls.first;
+  static String get wsServerUrl => candidateWsUrls.first;
 
   static String? _localIp;
   static String? get localIp => _localIp;
@@ -113,9 +113,9 @@ class AppConfig {
 
   static const Duration apiTimeout = Duration(seconds: 15);
   static const Duration cacheDuration = Duration(hours: 1);
-  static const Duration wsConnectTimeout = Duration(seconds: 8);
-  static const Duration wsRetryDelay = Duration(seconds: 2);
-  static const int wsMaxRetries = 5;
+  static const Duration wsConnectTimeout = Duration(seconds: 12);
+  static const Duration wsRetryDelay = Duration(seconds: 3);
+  static const int wsMaxRetries = 4;
   static const Duration healthCheckTimeout = Duration(seconds: 3);
 
   // ── Limits ──────────────────────────────────────────────────
