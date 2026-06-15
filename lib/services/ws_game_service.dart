@@ -114,7 +114,7 @@ class WsGameService {
     _pingTimer?.cancel();
     _pingTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_ws != null && _ws!.readyState == WebSocket.open) {
-        try { _ws!.ping(); } catch (_) {}
+        try { _ws!.add(jsonEncode({'type': 'ping'})); } catch (_) {}
       }
     });
   }

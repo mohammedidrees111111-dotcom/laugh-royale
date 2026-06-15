@@ -49,8 +49,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   List<CameraDescription>? _cameras;
   late SmileDetector _detector;
   Timer? _faceTimer;
-  StreamSubscription<SmileData>? _debugSub;
-  SmileData? _debugData;
   Timer? _cameraTimeout;
 
   int _timeLeft = 0;
@@ -107,9 +105,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _matchId = widget.matchId;
 
     _initCamera();
-    _debugSub = _detector.debugStream.listen((d) {
-      if (mounted) setState(() => _debugData = d);
-    });
     if (widget.isPractice) {
       _startPracticeAI();
     } else if (widget.isLocal || widget.isWebSocket || widget.isFbOnline) {
@@ -436,31 +431,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     });
   }
 
-  Widget _buildDebugOverlay() {
-    final d = _debugData!;
-    final scoreColor = d.smileScore > 0.30 ? Colors.redAccent : d.smileScore > 0.15 ? Colors.orange : Colors.greenAccent;
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 8),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(color: Colors.black.withAlpha(160), borderRadius: BorderRadius.circular(8)),
-      child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-        _debugLabel('Smile', '${(d.smileScore * 100).toInt()}%', scoreColor),
-        _debugLabel('Class', d.classificationProb >= 0 ? '${(d.classificationProb * 100).toInt()}%' : 'N/A', Colors.white54),
-        _debugLabel('Contour', '${(d.contourScore * 100).toInt()}%', Colors.white54),
-        _debugLabel('Faces', '${d.faceCount}', Colors.white54),
-        _debugLabel('FPS', '${_detector.fps}', Colors.white54),
-        _debugLabel('ms', '${d.detectionMs.toInt()}', Colors.white38),
-      ]),
-    );
-  }
-
-  Widget _debugLabel(String label, String value, Color color) {
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      Text(label, style: const TextStyle(color: Colors.white24, fontSize: 8)),
-      Text(value, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
-    ]);
-  }
-
   void _startPracticeAI() {
     Timer.periodic(const Duration(seconds: 2), (t) {
       if (!mounted || _gameOver) { t.cancel(); return; }
@@ -593,7 +563,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _camera?.stopImageStream();
     _faceTimer?.cancel();
     _countdownTimer?.cancel();
-    _debugSub?.cancel();
     _camera?.dispose();
     _detector.dispose();
     GameSyncService.dispose();
@@ -662,7 +631,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           ),
           _buildActionBar(),
           _buildStatusMessage(),
-          if (_debugData != null) _buildDebugOverlay(),
         ]),
       ),
     );
