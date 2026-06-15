@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "155540322803",
+    "project_id": "laugh-royale",
+    "storage_bucket": "laugh-royale.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:155540322803:android:55bef9d90d7fe111833a86",
+        "android_client_info": {
+          "package_name": "com.laughroyale.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCa0zFcQUUuz_NUsLUM2Z0yklciNrpUd94"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

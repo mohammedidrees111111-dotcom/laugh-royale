@@ -1,0 +1,17 @@
+{
+  "name": "laugh-royale-server",
+  "version": "2.0.0",
+  "description": "Laugh Royale WebSocket relay server - production ready",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node -e \"const http=require('http');http.get('http://localhost:'+(process.env.PORT||3000)+'/health',r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{const j=JSON.parse(d);console.log(j.status==='ok'?'PASS':'FAIL',j);process.exit(j.status==='ok'?0:1)})}).on('error',()=>{console.log('FAIL: server not running');process.exit(1)})\""
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

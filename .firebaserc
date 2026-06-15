@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "laugh-royale"
+  },
+  "targets": {
+    "laugh-royale": {
+      "database": {
+        "default": [
+          "laugh-royale-default-rtdb"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
