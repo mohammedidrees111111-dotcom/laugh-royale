@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../config/app_config.dart';
 
@@ -27,6 +28,10 @@ class WsGameService {
   static bool _inQueue = false;
   static bool _cancelled = false;
   static Timer? _pingTimer;
+  static String? _lastConnectedUrl;
+  static Timer? _reconnectTimer;
+  static int _reconnectAttempts = 0;
+  static const int _maxReconnectAttempts = 5;
 
   static bool get isConnected => _connected;
   static String? get roomCode => _roomCode;
@@ -84,18 +89,21 @@ class WsGameService {
 
           debugPrint('[WS] ✅ Connected to $candidate');
           _connected = true;
+          _lastConnectedUrl = candidate;
 
           _ws!.listen(
             _onMessage,
             onDone: () {
-              debugPrint('[WS] Connection closed by server');
+              debugPrint('[WS] Connection closed');
               _connected = false;
               _inQueue = false;
+              _onDisconnected();
             },
             onError: (e) {
               debugPrint('[WS] Connection error: $e');
               _connected = false;
               _inQueue = false;
+              _onDisconnected();
             },
           );
 
@@ -146,6 +154,70 @@ class WsGameService {
     });
   }
 
+  // ── Auto-reconnect ──────────────────────────────────────────
+
+  static void _onDisconnected() {
+    if (_cancelled) return;
+    if (_reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('[WS] Max reconnect attempts reached');
+      _statusController.add(WsMatchStatus.connectionFailed);
+      return;
+    }
+
+    _reconnectAttempts++;
+    final delay = Duration(seconds: 2 * _reconnectAttempts);
+    debugPrint('[WS] Scheduling reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts in ${delay.inSeconds}s');
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, () => _attemptReconnect());
+  }
+
+  static Future<void> _attemptReconnect() async {
+    if (_cancelled) return;
+
+    final url = _lastConnectedUrl ?? AppConfig.wsServerUrl;
+    debugPrint('[WS] Reconnecting to $url...');
+
+    try {
+      _disposeSocket();
+      _ws = await WebSocket.connect(url).timeout(const Duration(seconds: 10));
+
+      debugPrint('[WS] Reconnected!');
+      _connected = true;
+      _reconnectAttempts = 0;
+
+      _ws!.listen(
+        _onMessage,
+        onDone: () {
+          debugPrint('[WS] Reconnected socket closed');
+          _connected = false;
+          _onDisconnected();
+        },
+        onError: (e) {
+          debugPrint('[WS] Reconnected socket error: $e');
+          _connected = false;
+          _onDisconnected();
+        },
+      );
+
+      _startPing();
+
+      if (_roomCode != null && _playerId != null) {
+        debugPrint('[WS] Resuming in room $_roomCode');
+      } else if (_inQueue && _playerId != null) {
+        debugPrint('[WS] Rejoining matchmaking queue');
+        _send({
+          'type': 'matchmaking_join',
+          'id': _playerId,
+          'name': _opponentName ?? 'Player',
+        });
+      }
+    } catch (e) {
+      debugPrint('[WS] Reconnect failed: $e');
+      _onDisconnected();
+    }
+  }
+
   // ── Matchmaking Queue ───────────────────────────────────────
 
   static Future<Map<String, dynamic>?> joinMatchmakingQueue({
@@ -168,6 +240,10 @@ class WsGameService {
     }
 
     debugPrint('[WS] Connected. Sending matchmaking_join...');
+
+    final rng = Random();
+    await Future.delayed(Duration(milliseconds: rng.nextInt(200)));
+
     _send({
       'type': 'matchmaking_join',
       'id': playerId,
@@ -419,6 +495,10 @@ class WsGameService {
     _inQueue = false;
     _pingTimer?.cancel();
     _pingTimer = null;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+    _lastConnectedUrl = null;
     _playerRole = null;
     _opponentId = null;
     _opponentName = null;

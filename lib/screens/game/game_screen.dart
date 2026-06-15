@@ -114,6 +114,15 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _camera?.stopImageStream();
+    } else if (state == AppLifecycleState.resumed && !_gameOver) {
+      _initCamera();
+    }
+  }
+
   Future<void> _initCamera() async {
     try {
       _cameras = await availableCameras().timeout(const Duration(seconds: 5));
