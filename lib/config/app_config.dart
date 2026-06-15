@@ -50,6 +50,8 @@ class AppConfig {
       candidates.add('ws://$subnet.1:3000');
     }
 
+    candidates.add(_productionUrl);
+
     return candidates;
   }
 
