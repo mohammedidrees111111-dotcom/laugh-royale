@@ -62,6 +62,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   int _frameSkipCounter = 0;
   bool _processingFrame = false;
   CameraImage? _pendingFrame;
+  int _totalFrames = 0;
+  int _facesFound = 0;
+  int _smilesDetected = 0;
+  int _framesProcessed = 0;
 
   String _oppStatus = 'Ready';
   String? _oppFaceBase64;
@@ -196,9 +200,13 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   }
 
   void _onCameraFrame(CameraImage image) {
+    _totalFrames++;
     if (_gameOver || _gameEnding) return;
     _pendingFrame = image;
-    if (_processingFrame) return;
+    if (_processingFrame) {
+      if (_totalFrames % 60 == 0) debugPrint('[SMILE] Frame dropped (processing previous) total=$_totalFrames');
+      return;
+    }
     _processingFrame = true;
     _processNextFrame();
   }
@@ -207,25 +215,43 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     while (_pendingFrame != null && !_gameOver && !_gameEnding) {
       final frame = _pendingFrame!;
       _pendingFrame = null;
+      _framesProcessed++;
       try {
         final inputImage = _cameraImageToInputImage(frame);
-        if (inputImage == null) continue;
+        if (inputImage == null) {
+          if (_framesProcessed % 30 == 0) debugPrint('[SMILE] InputImage conversion FAILED frame=$_framesProcessed');
+          continue;
+        }
         final smile = await _detector.processFrame(inputImage);
         if (!mounted || _gameOver || _gameEnding) break;
+
+        if (_framesProcessed % 15 == 0) {
+          debugPrint('[SMILE] Frame#$_framesProcessed smile=${smile.toStringAsFixed(2)} faces=$_facesFound detected=$_smilesDetected');
+        }
+
+        if (smile > 0.05) {
+          _facesFound++;
+          if (smile > 0.40) _smilesDetected++;
+        }
+
         GameSyncService.updateMySmile(matchId: _matchId, playerId: _myId, smileValue: smile);
         if (widget.isLocal) LocalGameService.sendSmile(smile);
-        if (widget.isWebSocket) WsGameService.sendSmile(smile);
+        if (widget.isWebSocket) {
+          WsGameService.sendSmile(smile);
+          if (_framesProcessed % 30 == 0) debugPrint('[SMILE] Sent via WebSocket smile=$smile');
+        }
         if (widget.isFbOnline) FbOnlineService.sendSmile(smile);
         setState(() {
           _mySmile = smile;
           if (smile > 0.40 && !_iLaughed) {
             _iLaughed = true;
-            debugPrint('GAME: I laughed! smile=$smile');
+            debugPrint('[SMILE] LAUGH DETECTED! smile=$smile threshold=0.40');
             if (widget.isLocal) {
               LocalGameService.sendGameEvent('laughed');
               _endGame(won: false, reason: 'player_laughed');
             } else if (widget.isWebSocket) {
               WsGameService.sendGameEvent('laughed');
+              debugPrint('[SMILE] Laugh event sent via WebSocket');
               _endGame(won: false, reason: 'player_laughed');
             } else if (widget.isFbOnline) {
               FbOnlineService.sendGameEvent('laughed');
@@ -236,7 +262,9 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
             }
           }
         });
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('[SMILE] ERROR processing frame: $e');
+      }
     }
     _processingFrame = false;
   }
@@ -409,11 +437,13 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       final type = msg['type'] as String?;
       if (type == 'smile') {
         final val = (msg['value'] as num?)?.toDouble() ?? 0.0;
+        if (val > 0.50) debugPrint('[SMILE] Opponent smile=${val.toStringAsFixed(2)} (HIGH!)');
         setState(() {
           _oppSmile = val;
           _oppStatus = val > 0.3 ? 'Nervous' : 'Holding';
         });
         if (val > 0.40 && !_gameOver) {
+          debugPrint('[SMILE] OPPONENT LAUGHED! smile=$val');
           _endGame(won: true, reason: 'opponent_laughed');
         }
       } else if (type == 'face') {

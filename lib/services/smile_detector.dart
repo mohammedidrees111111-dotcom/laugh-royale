@@ -71,6 +71,7 @@ class SmileDetector {
       }
 
       if (faces.isEmpty) {
+        if (_fpsCounter == 0) debugPrint('[MLKIT] No faces detected FPS=$_fps');
         final data = SmileData(smileScore: 0, classificationProb: 0, contourScore: 0, faceCount: 0, detectionMs: sw.elapsedMilliseconds.toDouble());
         _debugController.add(data);
         _smileController.add(0.0);
@@ -81,6 +82,10 @@ class SmileDetector {
       final classProb = face.smilingProbability ?? -1.0;
       final contourScore = _computeMouthContourSmile(face);
       final smileScore = classProb >= 0 ? (classProb * 0.7 + contourScore * 0.3) : contourScore;
+
+      if (_fpsCounter == 0) {
+        debugPrint('[MLKIT] Face found | classProb=${classProb.toStringAsFixed(2)} contour=${contourScore.toStringAsFixed(2)} smile=${smileScore.toStringAsFixed(2)} faces=${faces.length} ms=${sw.elapsedMilliseconds}');
+      }
 
       final data = SmileData(
         smileScore: smileScore,
