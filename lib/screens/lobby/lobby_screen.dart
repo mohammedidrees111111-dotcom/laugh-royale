@@ -1,14 +1,11 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import '../../l10n/localization.dart';
-import '../../config/app_config.dart';
 import '../../services/auth_service.dart';
-import '../../services/firebase_service.dart';
 import '../../services/lobby_service.dart';
-import '../../services/local_game_service.dart';
 import '../../services/ws_game_service.dart';
-import '../../services/fb_online_service.dart';
-import '../game/test_smile_screen.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../game/game_screen.dart';
 
 class LobbyScreen extends StatefulWidget {
@@ -18,23 +15,25 @@ class LobbyScreen extends StatefulWidget {
 }
 
 class _LobbyScreenState extends State<LobbyScreen> {
-  final _ipCtrl = TextEditingController();
   final _codeCtrl = TextEditingController();
   bool _loading = false;
   bool _searching = false;
-  bool _hosting = false;
-  bool _connecting = false;
   Map<String, int> _stats = {};
-  int? _hostPort;
+  bool _creatingRoom = false;
+  bool _joiningRoom = false;
+  String? _privateRoomCode;
   String? _opponentName;
-  String? _localIp;
-  String? _searchRoomCode;
+  String? _opponentId;
+  bool _userCancelled = false;
+  int _warmupSeconds = 0;
+  Timer? _warmupTimer;
+  StreamSubscription? _roomSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadStats();
-      AppConfig.detectLocalIp();
     });
   }
 
@@ -43,77 +42,35 @@ class _LobbyScreenState extends State<LobbyScreen> {
     if (mounted) setState(() => _stats = stats);
   }
 
-  void _startPractice() {
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => GameScreen(
-      matchId: 'p_${DateTime.now().millisecondsSinceEpoch}',
-      opponentId: 'ai',
-      opponentName: 'AI Bot',
-      isPractice: true,
-    ))).then((_) => _loadStats());
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
   }
 
-  void _openTestSmile() {
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TestSmileScreen()));
+  void _startWarmupTimer() {
+    _warmupSeconds = 0;
+    _warmupTimer?.cancel();
+    _warmupTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _warmupSeconds++);
+    });
   }
 
-  // ──────────────────────────────────────────────────────────────
-  //  LOCAL WIFI
-  // ──────────────────────────────────────────────────────────────
-
-  Future<void> _hostLocal() async {
-    final id = AuthService.currentUserId ?? 'L${Random().nextInt(99999)}';
-    final name = AuthService.displayName;
-    setState(() => _hosting = true);
-    try {
-      final port = await LocalGameService.startHosting(playerName: name, playerId: id);
-      if (!mounted) return;
-      _hostPort = port;
-      _localIp = await LocalGameService.getLocalIp();
-      setState(() {});
-      LocalGameService.messages.listen((msg) {
-        if (!mounted || _opponentName != null) return;
-        if (msg['type'] == 'handshake') setState(() => _opponentName = msg['name'] as String? ?? 'Player2');
-      });
-    } catch (e) {
-      if (mounted) { setState(() => _hosting = false); _snack('Failed'); }
-    }
+  void _stopWarmupTimer() {
+    _warmupTimer?.cancel();
+    _warmupTimer = null;
   }
 
-  void _startLocalGame() {
-    LocalGameService.sendGameEvent('start');
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => GameScreen(
-      matchId: 'L_${DateTime.now().millisecondsSinceEpoch}',
-      opponentId: 'local',
-      opponentName: _opponentName ?? 'Player2',
-      isLocal: true,
-    ))).then((_) { LocalGameService.dispose(); _loadStats(); });
-  }
-
-  Future<void> _joinLocal() async {
-    final ip = _ipCtrl.text.trim();
-    if (ip.isEmpty) { _snack('Enter host IP'); return; }
-    final id = AuthService.currentUserId ?? 'L${Random().nextInt(99999)}';
-    final name = AuthService.displayName;
-    setState(() => _connecting = true);
-    final ok = await LocalGameService.connectToHost(
-        host: ip, port: 9999, playerName: name, playerId: id);
-    if (!mounted) return;
-    if (ok) {
-      setState(() => _connecting = false);
-      LocalGameService.messages.listen((msg) {
-        if (!mounted) return;
-        final t = msg['type'] as String?;
-        if (t == 'handshake') setState(() => _opponentName = msg['name'] as String? ?? 'Host');
-        if (t == 'event' && msg['event'] == 'start') _gotoGame('L', _opponentName ?? 'Host', isLocal: true);
-      });
-    } else {
-      setState(() => _connecting = false);
-      _snack('Could not connect');
-    }
+  String get _warmupText {
+    if (_warmupSeconds < 10) return 'Waking up game server...';
+    if (_warmupSeconds < 25) return 'Server is waking up (cold start)...';
+    if (_warmupSeconds < 40) return 'Almost ready...';
+    return 'Still waiting for server...';
   }
 
   // ──────────────────────────────────────────────────────────────
-  //  RANDOM MATCH (WebSocket matchmaking) — CRITICAL FIX
+  //  RANDOM MATCH (WebSocket matchmaking)
   // ──────────────────────────────────────────────────────────────
 
   Future<void> _startRandomMatch() async {
@@ -126,16 +83,28 @@ class _LobbyScreenState extends State<LobbyScreen> {
       _loading = true;
       _searching = true;
       _opponentName = null;
+      _userCancelled = false;
     });
 
+    _startWarmupTimer();
+
     debugPrint('[LOBBY] Starting random match for $name ($id)');
+
+    Permission.microphone.request();
 
     final result = await WsGameService.joinMatchmakingQueue(
       playerId: id,
       playerName: name,
     );
 
+    _stopWarmupTimer();
+
     if (!mounted) return;
+
+    if (_userCancelled) {
+      setState(() { _loading = false; _searching = false; });
+      return;
+    }
 
     if (result != null) {
       final roomId = result['roomId'] as String;
@@ -147,28 +116,27 @@ class _LobbyScreenState extends State<LobbyScreen> {
       setState(() {
         _loading = false;
         _searching = false;
-        _opponentName = oppName;
-        _searchRoomCode = roomId;
       });
 
-      _gotoGame('R', oppName, isWebSocket: true, roomCode: roomId);
+      _gotoGame(
+        roomCode: roomId,
+        opponentId: WsGameService.opponentId ?? 'opp',
+        opponentName: oppName,
+        isWebSocket: true,
+        isHost: role == 'host',
+      );
     } else {
-      debugPrint('[LOBBY] Matchmaking returned null — no match');
+      setState(() { _loading = false; _searching = false; });
 
-      setState(() {
-        _loading = false;
-        _searching = false;
-      });
-
-      if (!WsGameService.isConnected) {
-        _showOfflineDialog(id, name);
-      } else {
+      if (!WsGameService.isConnected && !_userCancelled) {
+        _showOfflineDialog();
+      } else if (!_userCancelled) {
         _snack('No player found. Try again.');
       }
     }
   }
 
-  void _showOfflineDialog(String playerId, String playerName) {
+  void _showOfflineDialog() {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -176,20 +144,14 @@ class _LobbyScreenState extends State<LobbyScreen> {
         content: const Text(
           'Could not reach the game server.\n\n'
           'This may be because:\n'
-          '  1. Render server is waking up (retry in 30s)\n'
+          '  1. Server is waking up (retry in 30s)\n'
           '  2. No internet connection\n\n'
-          'Try again or use Local WiFi mode.',
+          'Try again or create a Private Room.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _startRandomMatch();
-            },
+            onPressed: () { Navigator.pop(ctx); _startRandomMatch(); },
             child: const Text('Retry'),
           ),
         ],
@@ -198,76 +160,150 @@ class _LobbyScreenState extends State<LobbyScreen> {
   }
 
   // ──────────────────────────────────────────────────────────────
-  //  GAME START — ensures both players transition together
+  //  PRIVATE ROOM (WebSocket — same server as random match)
   // ──────────────────────────────────────────────────────────────
 
-  void _startWsGame(String oppName) {
-    WsGameService.startGame();
-    _gotoGame('R', oppName, isWebSocket: true);
+  Future<void> _createPrivateRoom() async {
+    if (_creatingRoom) return;
+
+    final id = AuthService.currentUserId ?? 'P${Random().nextInt(99999)}';
+    final name = AuthService.displayName;
+
+    setState(() { _creatingRoom = true; _privateRoomCode = null; });
+
+    _startWarmupTimer();
+
+    final result = await WsGameService.hostRoom(
+      playerId: id,
+    );
+
+    _stopWarmupTimer();
+
+    if (!mounted) return;
+
+    if (result != null) {
+      final code = result['code'] as String;
+      setState(() {
+        _creatingRoom = false;
+        _privateRoomCode = code;
+      });
+
+      _roomSub?.cancel();
+      _roomSub = WsGameService.messages.listen((msg) {
+        if (!mounted) return;
+        if (msg['type'] == 'player_joined') {
+          final oppId = msg['id'] as String? ?? 'guest';
+          final oppName = msg['name'] as String? ?? 'Player';
+          setState(() {
+            _opponentId = oppId;
+            _opponentName = oppName;
+          });
+          _gotoGame(
+            roomCode: code,
+            opponentId: oppId,
+            opponentName: oppName,
+            isWebSocket: true,
+          );
+        }
+      });
+    } else {
+      setState(() { _creatingRoom = false; });
+      _snack('Failed to create room. Check connection.');
+    }
   }
 
-  void _startFbGame(String oppName) {
-    FbOnlineService.startGame();
-    _gotoGame('R', oppName, isFbOnline: true);
+  Future<void> _joinPrivateRoom() async {
+    final code = _codeCtrl.text.trim().toUpperCase();
+    if (code.isEmpty) { _snack('Enter room code'); return; }
+
+    final id = AuthService.currentUserId ?? 'J${Random().nextInt(99999)}';
+    final name = AuthService.displayName;
+
+    setState(() => _joiningRoom = true);
+
+    _startWarmupTimer();
+
+    final ok = await WsGameService.joinRoom(
+      code: code,
+      playerId: id,
+      playerName: name,
+    );
+
+    _stopWarmupTimer();
+
+    if (!mounted) return;
+
+    if (ok) {
+      setState(() {
+        _joiningRoom = false;
+        _opponentId = WsGameService.opponentId;
+        _opponentName = WsGameService.opponentName;
+      });
+
+      _gotoGame(
+        roomCode: code,
+        opponentId: WsGameService.opponentId ?? 'host',
+        opponentName: WsGameService.opponentName ?? 'Host',
+        isWebSocket: true,
+        isHost: false,
+      );
+    } else {
+      setState(() => _joiningRoom = false);
+      _snack('Room not found or already full.');
+    }
   }
 
-  void _gotoGame(String prefix, String oppName, {
-    bool isLocal = false,
-    bool isWebSocket = false,
-    bool isFbOnline = false,
-    String? roomCode,
-  }) {
-    final matchId = roomCode ?? '${prefix}_${DateTime.now().millisecondsSinceEpoch}';
-
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => GameScreen(
-      matchId: matchId,
-      opponentId: WsGameService.opponentId ?? 'opp',
-      opponentName: oppName,
-      isLocal: isLocal,
-      isWebSocket: isWebSocket,
-      isFbOnline: isFbOnline,
-    ))).then((_) {
-      WsGameService.dispose();
-      FbOnlineService.dispose();
-      LocalGameService.dispose();
-      _loadStats();
+  void _cancelPrivateRoom() {
+    _roomSub?.cancel();
+    _roomSub = null;
+    WsGameService.dispose();
+    setState(() {
+      _privateRoomCode = null;
+      _opponentName = null;
     });
   }
 
   // ──────────────────────────────────────────────────────────────
-  //  JOIN WITH CODE (RTDB)
+  //  NAVIGATE TO GAME
   // ──────────────────────────────────────────────────────────────
 
-  Future<void> _joinWithCode() async {
-    final code = _codeCtrl.text.trim().toUpperCase();
-    if (code.isEmpty) { _snack('Enter room code'); return; }
-    final id = AuthService.currentUserId ?? 'J${Random().nextInt(99999)}';
-    final name = AuthService.displayName;
-    final ok = await FbOnlineService.joinRoom(code: code, playerId: id, playerName: name);
-    if (!mounted) return;
-    if (ok) {
-      _snack('Connected! Waiting for host...');
-      FbOnlineService.messages.listen((msg) {
-        if (!mounted) return;
-        if (msg['type'] == 'event' && msg['event'] == 'started') {
-          _gotoGame('J', 'Host', isFbOnline: true);
-        }
-      });
-    } else {
-      _snack('Room not found');
-    }
-  }
+  void _gotoGame({
+    required String roomCode,
+    required String opponentId,
+    required String opponentName,
+    bool isHost = true,
+    bool isWebSocket = false,
+  }) {
+    _roomSub?.cancel();
+    _roomSub = null;
 
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
-    );
+    if (isWebSocket) {
+      WsGameService.startGame();
+    }
+
+    Navigator.of(context).push(MaterialPageRoute(builder: (_) => GameScreen(
+      matchId: roomCode,
+      opponentId: opponentId,
+      opponentName: opponentName,
+      isHost: isHost,
+      isWebSocket: isWebSocket,
+    ))).then((_) {
+      WsGameService.dispose();
+      _loadStats();
+      if (mounted) {
+        setState(() {
+          _privateRoomCode = null;
+          _opponentName = null;
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
-    _ipCtrl.dispose();
     _codeCtrl.dispose();
+    _warmupTimer?.cancel();
+    _roomSub?.cancel();
     super.dispose();
   }
 
@@ -277,243 +313,283 @@ class _LobbyScreenState extends State<LobbyScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final l = L.of(context);
     final theme = Theme.of(context);
     final name = AuthService.displayName;
 
-    if (_opponentName != null && (_hosting || LocalGameService.isConnected)) {
-      return _connectedScreen('WiFi', _opponentName!, _startLocalGame);
-    }
-
     return Scaffold(
-      appBar: AppBar(title: Text(l.lobby)),
+      appBar: AppBar(title: Text(L.of(context).lobby)),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(children: [
-          // ── Player card ──
-          Card(child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(children: [
-              CircleAvatar(
-                radius: 28,
-                backgroundColor: theme.colorScheme.primary.withOpacity(0.15),
-                child: Text(
-                  name.isNotEmpty ? name[0].toUpperCase() : '?',
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 2),
-                  Text(
-                    _searching ? 'Searching for opponent...' : _hosting ? 'Hosting...' : 'Ready',
-                    style: const TextStyle(color: Colors.white54, fontSize: 13),
-                  ),
-                ],
-              )),
-              Column(children: [
-                Text('${_stats['wins'] ?? 0}',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
-                const Text('Wins', style: TextStyle(fontSize: 10, color: Colors.white38)),
-              ]),
-              const SizedBox(width: 10),
-              Column(children: [
-                Text('${_stats['losses'] ?? 0}',
-                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.redAccent)),
-                const Text('Losses', style: TextStyle(fontSize: 10, color: Colors.white38)),
-              ]),
-            ]),
-          )),
+          _buildPlayerCard(theme, name),
           const SizedBox(height: 16),
 
-          _bigBtn('PRACTICE MODE', Icons.play_circle_fill, const Color(0xFF00E676), _startPractice),
-          const SizedBox(height: 6),
-          SizedBox(
-            width: double.infinity, height: 36,
-            child: OutlinedButton.icon(
-              onPressed: _openTestSmile,
-              icon: const Icon(Icons.science, size: 16),
-              label: const Text('Test Smile Detection', style: TextStyle(fontSize: 12)),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: Colors.white38,
-                side: const BorderSide(color: Colors.white12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // ── Searching UI ──
-          if (_searching) ...[
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 8),
-              padding: const EdgeInsets.all(32),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFF6584).withOpacity(0.08),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: const Color(0xFFFF6584).withOpacity(0.2)),
-              ),
-              child: Column(children: [
-                const SizedBox(
-                  width: 56, height: 56,
-                  child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFFFF6584)),
-                ),
-                const SizedBox(height: 20),
-                const Text('CONNECTING TO SERVER',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 2)),
-                const SizedBox(height: 8),
-                const Text('Waking up game server...',
-                    style: TextStyle(color: Colors.white54, fontSize: 13)),
-                const SizedBox(height: 4),
-                const Text('This may take up to 45 seconds on first try',
-                    style: TextStyle(color: Colors.white30, fontSize: 11)),
-                const SizedBox(height: 20),
-                OutlinedButton(
-                  onPressed: () {
-                    setState(() { _searching = false; _loading = false; });
-                    WsGameService.leaveMatchmakingQueue();
-                  },
-                  style: OutlinedButton.styleFrom(foregroundColor: Colors.white38),
-                  child: const Text('Cancel'),
-                ),
-              ]),
-            ),
-          ] else ...[
+          if (_searching)
+            _buildSearchingUI()
+          else ...[
             _bigBtn('RANDOM MATCH', Icons.shuffle, const Color(0xFFFF6584), _startRandomMatch),
             const SizedBox(height: 16),
           ],
 
-          _sectionHeader('LOCAL WIFI (Same Network)'),
-          if (_hosting && _hostPort != null)
-            Card(
-              color: const Color(0xFF6C63FF).withOpacity(0.1),
-              child: Padding(
-                padding: const EdgeInsets.all(14),
-                child: Column(children: [
-                  const Row(children: [
-                    Icon(Icons.wifi, color: Color(0xFF6C63FF)),
-                    SizedBox(width: 6),
-                    Text('Hosting...', style: TextStyle(color: Color(0xFF6C63FF), fontWeight: FontWeight.bold)),
-                  ]),
-                  const SizedBox(height: 8),
-                  const Text('Other phone enter:', style: TextStyle(color: Colors.white54, fontSize: 11)),
-                  const SizedBox(height: 2),
-                  Text('$_localIp', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 2)),
-                ]),
-              ),
-            )
-          else ...[
-            SizedBox(
-              width: double.infinity, height: 42,
-              child: FilledButton.icon(
-                onPressed: _hosting ? null : _hostLocal,
-                icon: const Icon(Icons.wifi_tethering, size: 18),
-                label: const Text('Host Local Match', style: TextStyle(fontSize: 13)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF6C63FF),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                ),
-              ),
-            ),
-            const SizedBox(height: 6),
-            Row(children: [
-              Expanded(child: TextField(
-                controller: _ipCtrl,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  hintText: 'Host IP',
-                  hintStyle: const TextStyle(fontSize: 12),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-                  isDense: true,
-                ),
-              )),
-              const SizedBox(width: 6),
-              FilledButton(
-                onPressed: _connecting ? null : _joinLocal,
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF00D9FF),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                ),
-                child: _connecting
-                    ? const SizedBox(width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Join', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ]),
-          ],
+          _sectionHeader('PRIVATE ROOM'),
+          const SizedBox(height: 8),
 
-          const SizedBox(height: 14),
-          _sectionHeader('JOIN WITH CODE'),
-          Row(children: [
-            Expanded(child: TextField(
-              controller: _codeCtrl,
-              textCapitalization: TextCapitalization.characters,
-              maxLength: 6,
-              decoration: InputDecoration(
-                hintText: 'Room code',
-                counterText: '',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-                isDense: true,
-              ),
-            )),
-            const SizedBox(width: 6),
-            FilledButton(
-              onPressed: _joinWithCode,
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-              ),
-              child: const Text('Join', style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-          ]),
-          const SizedBox(height: 40),
+          if (_creatingRoom || _joiningRoom)
+            _buildConnectingUI()
+          else if (_privateRoomCode != null && _opponentName == null)
+            _buildRoomCreatedUI()
+          else if (_opponentName != null && _privateRoomCode != null)
+            _buildConnectedUI()
+          else
+            _buildPrivateRoomForm(),
         ]),
       ),
     );
   }
 
-  Widget _connectedScreen(String mode, String opp, VoidCallback go) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Connected!')),
-      body: Center(child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+  Widget _buildPlayerCard(ThemeData theme, String name) {
+    return Card(child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(children: [
+        CircleAvatar(
+          radius: 28,
+          backgroundColor: theme.colorScheme.primary.withOpacity(0.15),
+          child: Text(
+            name.isNotEmpty ? name[0].toUpperCase() : '?',
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          ),
+        ),
+        const SizedBox(width: 14),
+        Expanded(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              mode == 'WiFi' ? Icons.wifi : Icons.public,
-              size: 64,
-              color: mode == 'WiFi' ? const Color(0xFF6C63FF) : const Color(0xFFFF6584),
-            ),
-            const SizedBox(height: 16),
-            const Text('PLAYER FOUND!', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text('vs $opp', style: const TextStyle(fontSize: 18, color: Color(0xFF6C63FF))),
-            const SizedBox(height: 28),
-            SizedBox(
-              width: double.infinity, height: 56,
-              child: FilledButton.icon(
-                onPressed: go,
-                icon: const Icon(Icons.play_arrow, size: 28),
-                label: const Text('START GAME', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFF00E676),
-                  foregroundColor: Colors.black,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-              ),
+            Text(name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 2),
+            Text(
+              _searching ? 'Searching for opponent...' : _privateRoomCode != null ? 'Room active' : 'Ready',
+              style: const TextStyle(color: Colors.white54, fontSize: 13),
             ),
           ],
+        )),
+        Column(children: [
+          Text('${_stats['wins'] ?? 0}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+          const Text('Wins', style: TextStyle(fontSize: 10, color: Colors.white38)),
+        ]),
+        const SizedBox(width: 10),
+        Column(children: [
+          Text('${_stats['losses'] ?? 0}',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.redAccent)),
+          const Text('Losses', style: TextStyle(fontSize: 10, color: Colors.white38)),
+        ]),
+      ]),
+    ));
+  }
+
+  Widget _buildSearchingUI() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF6584).withOpacity(0.08),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFFF6584).withOpacity(0.2)),
+      ),
+      child: Column(children: [
+        const SizedBox(
+          width: 56, height: 56,
+          child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFFFF6584)),
         ),
-      )),
+        const SizedBox(height: 20),
+        const Text('CONNECTING TO SERVER',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 2)),
+        const SizedBox(height: 8),
+        Text(_warmupText,
+            style: const TextStyle(color: Colors.white54, fontSize: 13)),
+        const SizedBox(height: 4),
+        Text('${_warmupSeconds}s elapsed',
+            style: const TextStyle(color: Colors.white30, fontSize: 11)),
+        const SizedBox(height: 20),
+        OutlinedButton(
+          onPressed: () {
+            _userCancelled = true;
+            _stopWarmupTimer();
+            setState(() { _searching = false; _loading = false; });
+            WsGameService.leaveMatchmakingQueue();
+          },
+          style: OutlinedButton.styleFrom(foregroundColor: Colors.white38),
+          child: const Text('Cancel'),
+        ),
+      ]),
     );
+  }
+
+  Widget _buildConnectingUI() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: const Color(0xFF6C63FF).withOpacity(0.08),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.2)),
+      ),
+      child: Column(children: [
+        const SizedBox(
+          width: 40, height: 40,
+          child: CircularProgressIndicator(strokeWidth: 3, color: Color(0xFF6C63FF)),
+        ),
+        const SizedBox(height: 12),
+        const Text('Connecting to server...',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        Text(_warmupText, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        const SizedBox(height: 8),
+        OutlinedButton(
+          onPressed: () {
+            _stopWarmupTimer();
+            setState(() { _creatingRoom = false; _joiningRoom = false; });
+            WsGameService.dispose();
+          },
+          style: OutlinedButton.styleFrom(foregroundColor: Colors.white38),
+          child: const Text('Cancel'),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildRoomCreatedUI() {
+    return Card(
+      color: const Color(0xFF6C63FF).withOpacity(0.1),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+          const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(Icons.vpn_lock, color: Color(0xFF6C63FF)),
+            SizedBox(width: 8),
+            Text('Room Created', style: TextStyle(color: Color(0xFF6C63FF), fontWeight: FontWeight.bold, fontSize: 16)),
+          ]),
+          const SizedBox(height: 16),
+          const Text('Share this code:', style: TextStyle(color: Colors.white54, fontSize: 13)),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.3)),
+            ),
+            child: Text(_privateRoomCode!,
+                style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 6, color: Color(0xFF6C63FF))),
+          ),
+          const SizedBox(height: 16),
+          const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 10),
+            Text('Waiting for opponent...', style: TextStyle(color: Colors.white54)),
+          ]),
+          const SizedBox(height: 12),
+          OutlinedButton(
+            onPressed: _cancelPrivateRoom,
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent.withOpacity(0.7)),
+            child: const Text('Cancel'),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildConnectedUI() {
+    return Card(
+      color: const Color(0xFF00E676).withOpacity(0.08),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(children: [
+          const Icon(Icons.check_circle, size: 56, color: Color(0xFF00E676)),
+          const SizedBox(height: 12),
+          const Text('PLAYER FOUND!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 4),
+          Text('vs $_opponentName', style: const TextStyle(fontSize: 16, color: Color(0xFF6C63FF))),
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity, height: 52,
+            child: FilledButton.icon(
+              onPressed: () {
+                _gotoGame(
+                  roomCode: _privateRoomCode!,
+                  opponentId: _opponentId ?? 'opp',
+                  opponentName: _opponentName!,
+                  isWebSocket: true,
+                  isHost: true,
+                );
+              },
+              icon: const Icon(Icons.play_arrow, size: 28),
+              label: const Text('START GAME', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF00E676),
+                foregroundColor: Colors.black,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildPrivateRoomForm() {
+    return Column(children: [
+      SizedBox(
+        width: double.infinity, height: 48,
+        child: FilledButton.icon(
+          onPressed: _creatingRoom ? null : _createPrivateRoom,
+          icon: _creatingRoom
+              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.add, size: 20),
+          label: Text(_creatingRoom ? 'Creating...' : 'Create Room', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF6C63FF),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+      ),
+      const SizedBox(height: 10),
+      Row(children: [
+        const SizedBox(width: 4),
+        const Text('or', style: TextStyle(color: Colors.white38, fontSize: 13)),
+        const SizedBox(width: 4),
+        const Expanded(child: Divider()),
+        const SizedBox(width: 8),
+      ]),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(child: TextField(
+          controller: _codeCtrl,
+          textCapitalization: TextCapitalization.characters,
+          maxLength: 6,
+          decoration: InputDecoration(
+            hintText: 'Enter room code',
+            counterText: '',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            isDense: true,
+          ),
+        )),
+        const SizedBox(width: 8),
+        FilledButton(
+          onPressed: _joiningRoom ? null : _joinPrivateRoom,
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF00D9FF),
+            foregroundColor: Colors.black,
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          child: _joiningRoom
+              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('Join', style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ]),
+      const SizedBox(height: 40),
+    ]);
   }
 
   Widget _bigBtn(String label, IconData icon, Color color, VoidCallback onTap) {
@@ -540,7 +616,7 @@ class _LobbyScreenState extends State<LobbyScreen> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8),
           child: Text(title,
-              style: const TextStyle(color: Colors.white38, fontSize: 9, fontWeight: FontWeight.bold, letterSpacing: 2)),
+              style: const TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.bold, letterSpacing: 2)),
         ),
         const Expanded(child: Divider()),
       ]),

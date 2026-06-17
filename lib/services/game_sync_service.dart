@@ -10,6 +10,7 @@ class GameSyncService {
   static const String _collection = 'match_rooms';
 
   static StreamSubscription? _gameSub;
+  static String? _lastProcessedEvent;
 
   static FirebaseFirestore? get _db => FirebaseService.firestore;
 
@@ -18,17 +19,20 @@ class GameSyncService {
     required String playerId,
     required Function(Map<String, dynamic>) onOpponentUpdate,
     required Function(String winner, String loser) onGameEnd,
+    Function(String event)? onGameEvent,
   }) async {
     if (_db == null) {
       throw Exception('Firebase not available - real multiplayer required');
     }
-    await _startOnline(matchId, playerId, onOpponentUpdate, onGameEnd);
+    _lastProcessedEvent = null;
+    await _startOnline(matchId, playerId, onOpponentUpdate, onGameEnd, onGameEvent);
   }
 
   static Future<void> _startOnline(
     String matchId, String playerId,
     Function(Map<String, dynamic>) onOpponentUpdate,
     Function(String, String) onGameEnd,
+    Function(String event)? onGameEvent,
   ) async {
     try {
       await _db!.collection(_collection).doc(matchId).update({
@@ -56,7 +60,38 @@ class GameSyncService {
       final oppId = isPlayer1 ? p2Id : p1Id;
       final oppSmile = (data['${oppId}_smile'] as num?)?.toDouble() ?? 0.0;
       onOpponentUpdate({'opponentId': oppId, 'opponentSmile': oppSmile, 'isReal': true});
+
+      if (onGameEvent != null) {
+        final eventData = data['gameEvent'];
+        if (eventData is Map) {
+          final eventKey = '${eventData['senderId']}_${eventData['timestamp']}';
+          if (eventKey != _lastProcessedEvent) {
+            _lastProcessedEvent = eventKey;
+            final event = eventData['event'] as String?;
+            if (event != null && eventData['senderId'] != playerId) {
+              onGameEvent(event);
+            }
+          }
+        }
+      }
     });
+  }
+
+  static Future<void> sendGameEvent({
+    required String matchId,
+    required String playerId,
+    required String event,
+  }) async {
+    if (_db == null) return;
+    try {
+      await _db!.collection(_collection).doc(matchId).update({
+        'gameEvent': {
+          'senderId': playerId,
+          'event': event,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        },
+      });
+    } catch (_) {}
   }
 
   static Future<void> updateMySmile({
@@ -110,5 +145,6 @@ class GameSyncService {
   static void dispose() {
     _gameSub?.cancel();
     _gameSub = null;
+    _lastProcessedEvent = null;
   }
 }

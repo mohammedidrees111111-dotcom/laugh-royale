@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 class AppTheme {
   AppTheme._();
 
+  static final ValueNotifier<bool> darkModeNotifier = ValueNotifier<bool>(true);
+
   static const Color primaryColor = Color(0xFF6C63FF);
   static const Color secondaryColor = Color(0xFF00D9FF);
   static const Color accentColor = Color(0xFFFF6584);

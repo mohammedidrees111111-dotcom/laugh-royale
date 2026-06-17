@@ -4,6 +4,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../l10n/localization.dart';
 import '../services/auth_service.dart';
 import '../services/error_handler.dart';
+import '../services/language_service.dart';
+import '../config/theme.dart';
 import 'onboarding/login_screen.dart';
 import 'onboarding/register_screen.dart';
 
@@ -75,16 +77,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _switchLanguage() async {
-    final currentLang = Localizations.localeOf(context).languageCode;
-    final newLang = currentLang == 'ar' ? 'en' : 'ar';
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('language', newLang);
-    if (mounted) {
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const SettingsScreen()),
-        (route) => false,
-      );
-    }
+    await LanguageService.switchLanguage();
   }
 
   @override
@@ -176,7 +169,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _switchTile(Icons.dark_mode, l.darkMode, 'Enable dark theme', _darkMode, (v) {
             setState(() => _darkMode = v);
             _savePreference('darkMode', v);
-            _snack('Restart app to apply');
+            AppTheme.darkModeNotifier.value = v;
           }),
           _switchTile(Icons.language, 'Language', isArabic ? '\u0627\u0644\u0639\u0631\u0628\u064a\u0629 (Arabic)' : 'English', isArabic, (_) => _switchLanguage()),
 

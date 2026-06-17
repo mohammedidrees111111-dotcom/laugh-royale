@@ -1,9 +1,8 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../services/error_handler.dart';
-import '../models/content_item.dart';
+import '../services/feed_service.dart';
 
 class CreateScreen extends StatefulWidget {
   const CreateScreen({super.key});
@@ -69,32 +68,29 @@ class _CreateScreenState extends State<CreateScreen> {
       return;
     }
 
-    final item = ContentItem(
-      id: DateTime.now().millisecondsSinceEpoch.toString(),
-      authorName: 'You',
-      authorAvatar: '\ud83d\ude04',
+    setState(() {});
+
+    final ok = await FeedService.createPost(
       content: caption.isEmpty ? 'Check this out!' : caption,
-      imageUrl: _selectedImagePath,
-      createdAt: DateTime.now(),
+      imagePath: _selectedImagePath,
+      category: _selectedCategory,
     );
 
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final posts = prefs.getStringList('user_posts') ?? [];
-      posts.insert(0, item.toJson().toString());
-      if (posts.length > 50) posts.removeLast();
-      await prefs.setStringList('user_posts', posts);
-    } catch (_) {}
+    if (!mounted) return;
 
-    if (mounted) {
+    if (ok) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Post created and saved!'), backgroundColor: Colors.green),
+        const SnackBar(content: Text('Post created!'), backgroundColor: Colors.green),
       );
       setState(() {
         _selectedImagePath = null;
         _captionController.clear();
         _selectedCategory = null;
       });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to post. Check connection.'), backgroundColor: Colors.red),
+      );
     }
   }
 

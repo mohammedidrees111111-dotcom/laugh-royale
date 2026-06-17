@@ -77,5 +77,5 @@ class _LDelegate extends LocalizationsDelegate<L> {
   Future<L> load(Locale locale) async => L(locale);
 
   @override
-  bool shouldReload(covariant LocalizationsDelegate<L> old) => false;
+  bool shouldReload(covariant LocalizationsDelegate<L> old) => true;
 }

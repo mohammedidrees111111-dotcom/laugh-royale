@@ -6,7 +6,8 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:google_mlkit_commons/google_mlkit_commons.dart';
 import '../../services/smile_detector.dart';
 import '../../services/lobby_service.dart';
 import '../../services/auth_service.dart';
@@ -16,6 +17,7 @@ import '../../services/local_game_service.dart';
 import '../../services/ws_game_service.dart';
 import '../../services/fb_online_service.dart';
 import '../../services/game_sound_service.dart';
+import '../../services/voice_chat_service.dart';
 import 'game_over_screen.dart';
 
 class GameScreen extends StatefulWidget {
@@ -23,7 +25,6 @@ class GameScreen extends StatefulWidget {
   final String opponentId;
   final String opponentName;
   final bool isHost;
-  final bool isPractice;
   final bool isLocal;
   final bool isWebSocket;
   final bool isFbOnline;
@@ -34,7 +35,6 @@ class GameScreen extends StatefulWidget {
     required this.opponentId,
     required this.opponentName,
     this.isHost = true,
-    this.isPractice = false,
     this.isLocal = false,
     this.isWebSocket = false,
     this.isFbOnline = false,
@@ -66,6 +66,10 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   int _facesFound = 0;
   int _smilesDetected = 0;
   int _framesProcessed = 0;
+  int _consecutiveSmileFrames = 0;
+  static const int _requiredConsecutiveFrames = 2;
+  static const double _laughThreshold = 0.35;
+  static const double _smileResetThreshold = 0.20;
 
   String _oppStatus = 'Ready';
   String? _oppFaceBase64;
@@ -109,18 +113,20 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     _matchId = widget.matchId;
 
     _initCamera();
-    if (widget.isPractice) {
-      _startPracticeAI();
-    } else if (widget.isLocal || widget.isWebSocket || widget.isFbOnline) {
+    if (widget.isLocal || widget.isWebSocket || widget.isFbOnline) {
       _startOnlineGame();
     } else {
       _startGameSync();
+    }
+    if (widget.isWebSocket) {
+      Future.delayed(const Duration(milliseconds: 500), _startVoiceChat);
     }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
+      _detector.stop();
       _camera?.stopImageStream();
     } else if (state == AppLifecycleState.resumed && !_gameOver) {
       _initCamera();
@@ -129,6 +135,18 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
   Future<void> _initCamera() async {
     try {
+      final camStatus = await Permission.camera.request();
+      if (!camStatus.isGranted) {
+        debugPrint('[CAMERA] Camera permission DENIED');
+        if (mounted) setState(() => _cameraError = 'Camera permission denied');
+        return;
+      }
+      debugPrint('[CAMERA] Camera permission GRANTED');
+    } catch (e) {
+      debugPrint('[CAMERA] Permission check error: $e');
+    }
+
+    try {
       _cameras = await availableCameras().timeout(const Duration(seconds: 5));
     } catch (_) {
       _cameras = null;
@@ -136,7 +154,6 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
     if (_cameras == null || _cameras!.isEmpty) {
       if (mounted) setState(() => _cameraError = 'No camera available');
-      _startGame();
       return;
     }
 
@@ -166,21 +183,22 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('Camera init error: $e');
       if (mounted) setState(() => _cameraError = 'Camera failed to start');
-      _startGame();
       return;
     }
 
     try {
       await _camera!.startImageStream(_onCameraFrame);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[CAMERA] startImageStream FAILED: $e');
+      if (mounted) setState(() => _cameraError = 'Camera stream failed');
+      return;
+    }
 
     if (mounted) setState(() => _cameraReady = true);
 
     _startGame();
-    if (!widget.isPractice) {
-      _startFaceSharing();
-      _watchOpponentFace();
-    }
+    _startFaceSharing();
+    _watchOpponentFace();
   }
 
   Future<ResolutionPreset> _bestResolution(CameraDescription camera) async {
@@ -201,10 +219,11 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
   void _onCameraFrame(CameraImage image) {
     _totalFrames++;
+    if (_totalFrames % 30 == 0) debugPrint('[CAMERA] Frame received total=$_totalFrames');
     if (_gameOver || _gameEnding) return;
     _pendingFrame = image;
     if (_processingFrame) {
-      if (_totalFrames % 60 == 0) debugPrint('[SMILE] Frame dropped (processing previous) total=$_totalFrames');
+      if (_totalFrames % 60 == 0) debugPrint('[CAMERA] Frame dropped (processing previous) total=$_totalFrames');
       return;
     }
     _processingFrame = true;
@@ -212,46 +231,58 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _processNextFrame() async {
-    while (_pendingFrame != null && !_gameOver && !_gameEnding) {
-      final frame = _pendingFrame!;
-      _pendingFrame = null;
-      _framesProcessed++;
-      try {
-        final inputImage = _cameraImageToInputImage(frame);
-        if (inputImage == null) {
-          if (_framesProcessed % 30 == 0) debugPrint('[SMILE] InputImage conversion FAILED frame=$_framesProcessed');
-          continue;
-        }
-        final smile = await _detector.processFrame(inputImage);
-        if (!mounted || _gameOver || _gameEnding) break;
+    try {
+      while (_pendingFrame != null && !_gameOver && !_gameEnding) {
+        final frame = _pendingFrame!;
+        _pendingFrame = null;
+        _framesProcessed++;
+        try {
+          final inputImage = _cameraImageToInputImage(frame);
+          if (inputImage == null) {
+            if (_framesProcessed % 30 == 0) debugPrint('[CAMERA] InputImage conversion FAILED frame=$_framesProcessed');
+            continue;
+          }
+          final smile = await _detector.processFrame(inputImage);
+          if (!mounted || _gameOver || _gameEnding) break;
 
-        if (_framesProcessed % 15 == 0) {
-          debugPrint('[SMILE] Frame#$_framesProcessed smile=${smile.toStringAsFixed(2)} faces=$_facesFound detected=$_smilesDetected');
-        }
+          if (_framesProcessed % 15 == 0) {
+            debugPrint('[MLKIT] Frame#$_framesProcessed smile=${smile.toStringAsFixed(2)} consecutive=$_consecutiveSmileFrames/$_requiredConsecutiveFrames faces=$_facesFound');
+          }
 
-        if (smile > 0.05) {
-          _facesFound++;
-          if (smile > 0.40) _smilesDetected++;
-        }
+          if (smile > 0.05) {
+            _facesFound++;
+            if (smile > _laughThreshold) {
+              _smilesDetected++;
+              _consecutiveSmileFrames++;
+              if (_consecutiveSmileFrames % 10 == 0) {
+                debugPrint('[SMILE] Above threshold consecutive=$_consecutiveSmileFrames/$_requiredConsecutiveFrames smile=${smile.toStringAsFixed(2)}');
+              }
+            } else if (smile < _smileResetThreshold) {
+              _consecutiveSmileFrames = 0;
+            }
+          } else {
+            _consecutiveSmileFrames = 0;
+          }
 
-        GameSyncService.updateMySmile(matchId: _matchId, playerId: _myId, smileValue: smile);
-        if (widget.isLocal) LocalGameService.sendSmile(smile);
-        if (widget.isWebSocket) {
-          WsGameService.sendSmile(smile);
-          if (_framesProcessed % 30 == 0) debugPrint('[SMILE] Sent via WebSocket smile=$smile');
-        }
-        if (widget.isFbOnline) FbOnlineService.sendSmile(smile);
-        setState(() {
-          _mySmile = smile;
-          if (smile > 0.40 && !_iLaughed) {
+          GameSyncService.updateMySmile(matchId: _matchId, playerId: _myId, smileValue: smile);
+          if (widget.isLocal) LocalGameService.sendSmile(smile);
+          if (widget.isWebSocket) {
+            if (_framesProcessed % 2 == 0) {
+              WsGameService.sendSmile(smile);
+            }
+            if (_framesProcessed % 30 == 0) debugPrint('[WS] Sent smile=$smile via WebSocket');
+          }
+          if (widget.isFbOnline) FbOnlineService.sendSmile(smile);
+
+          if (_consecutiveSmileFrames >= _requiredConsecutiveFrames && !_iLaughed) {
             _iLaughed = true;
-            debugPrint('[SMILE] SELF LAUGH myId=$_myId won=false');
+            debugPrint('[SMILE] LAUGH TRIGGERED consecutive=$_consecutiveSmileFrames playerId=$_myId smile=${smile.toStringAsFixed(2)}');
             if (widget.isLocal) {
               LocalGameService.sendGameEvent('laughed');
               _endGame(won: false, reason: 'player_laughed');
             } else if (widget.isWebSocket) {
               WsGameService.sendGameEvent('laughed');
-              debugPrint('[SMILE] Laugh event sent via WebSocket');
+              debugPrint('[EVENT] laughed event dispatched via WebSocket playerId=$_myId');
               _endGame(won: false, reason: 'player_laughed');
             } else if (widget.isFbOnline) {
               FbOnlineService.sendGameEvent('laughed');
@@ -262,12 +293,17 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
               _endGame(won: false, reason: 'player_laughed');
             }
           }
-        });
-      } catch (e) {
-        debugPrint('[SMILE] ERROR processing frame: $e');
+
+          setState(() {
+            _mySmile = smile;
+          });
+        } catch (e) {
+          debugPrint('[SMILE] ERROR processing frame: $e');
+        }
       }
+    } finally {
+      _processingFrame = false;
     }
-    _processingFrame = false;
   }
 
   InputImage? _cameraImageToInputImage(CameraImage image) {
@@ -276,6 +312,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     InputImageFormat inputFormat;
     Uint8List bytes;
     final rawFormat = image.format.raw;
+
     if (rawFormat == 17) {
       inputFormat = InputImageFormat.nv21;
       bytes = _packNv21(image, width, height);
@@ -289,15 +326,39 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       inputFormat = InputImageFormat.nv21;
       bytes = _packNv21(image, width, height);
     }
+
+    final rotation = _cameraRotation;
+
     return InputImage.fromBytes(
       bytes: bytes,
       metadata: InputImageMetadata(
         size: Size(width.toDouble(), height.toDouble()),
-        rotation: InputImageRotation.rotation0deg,
+        rotation: rotation,
         format: inputFormat,
-        bytesPerRow: width,
+        bytesPerRow: image.planes[0].bytesPerRow,
       ),
     );
+  }
+
+  InputImageRotation _cameraRotationFromDegrees(int degrees) {
+    switch (degrees) {
+      case 0: return InputImageRotation.rotation0deg;
+      case 90: return InputImageRotation.rotation90deg;
+      case 180: return InputImageRotation.rotation180deg;
+      case 270: return InputImageRotation.rotation270deg;
+      default: return InputImageRotation.rotation0deg;
+    }
+  }
+
+  InputImageRotation get _cameraRotation {
+    try {
+      final desc = _camera?.description;
+      if (desc != null) {
+        final sensorOrientation = desc.sensorOrientation;
+        return _cameraRotationFromDegrees(sensorOrientation);
+      }
+    } catch (_) {}
+    return InputImageRotation.rotation270deg;
   }
 
   Uint8List _packNv21(CameraImage image, int width, int height) {
@@ -418,6 +479,15 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         final iWon = winner == _myId;
         _endGame(won: iWon, reason: iWon ? 'opponent_laughed' : 'player_laughed');
       },
+      onGameEvent: (event) {
+        if (!mounted || _gameOver) return;
+        if (event == 'quit') {
+          _endGame(won: true, reason: 'opponent_quit');
+        } else if (event.startsWith('sound_')) {
+          final soundIdx = int.tryParse(event.substring(6)) ?? -1;
+          if (soundIdx >= 0) GameSoundService.play(soundIdx);
+        }
+      },
     );
     if (widget.isHost) {
       GameSyncService.setGameStarted(_matchId);
@@ -438,15 +508,13 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
       final type = msg['type'] as String?;
       if (type == 'smile') {
         final val = (msg['value'] as num?)?.toDouble() ?? 0.0;
-        if (val > 0.50) debugPrint('[SMILE] Opponent smile=${val.toStringAsFixed(2)} (HIGH!)');
+        if (_framesProcessed % 15 == 0 && val > 0.50) {
+          debugPrint('[SMILE] Opponent smile=${val.toStringAsFixed(2)} (HIGH!)');
+        }
         setState(() {
           _oppSmile = val;
           _oppStatus = val > 0.3 ? 'Nervous' : 'Holding';
         });
-        if (val > 0.40 && !_gameOver) {
-          debugPrint('[SMILE] OPPONENT LAUGHED! smile=$val');
-          _endGame(won: true, reason: 'opponent_laughed');
-        }
       } else if (type == 'face') {
         final data = msg['data'] as String?;
         if (data != null && data.length > 50) {
@@ -455,19 +523,25 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
             setState(() { _oppFaceBytes = bytes; _oppFaceLoaded = true; });
           } catch (_) {}
         }
+      } else if (type == 'opponent_disconnected') {
+        debugPrint('[EVENT] Opponent disconnected (server notification)');
+        setState(() => _oppStatus = 'Reconnecting...');
+      } else if (type == 'opponent_reconnected') {
+        debugPrint('[EVENT] Opponent reconnected');
+        setState(() => _oppStatus = 'Ready');
       } else if (type == 'event') {
         final evt = msg['event'] as String?;
-        debugPrint('[EVENT] Received: $evt myId=$_myId');
+        debugPrint('[CLIENT] Event received: $evt myId=$_myId');
         if (evt == 'laughed' || evt == 'you_won') {
-          if (!_gameOver) { _endGame(won: true, reason: 'opponent_laughed'); }
+          if (!_gameOver) {
+            debugPrint('[CLIENT] Opponent laugh event — triggering game over (won=true)');
+            _endGame(won: true, reason: 'opponent_laughed');
+          }
         } else if (evt == 'you_lost' && !_gameOver) {
+          debugPrint('[CLIENT] Server confirmed loss');
           _endGame(won: false, reason: 'player_laughed');
         } else if (evt == 'quit') {
           if (!_gameOver) _endGame(won: true, reason: 'opponent_quit');
-        } else if (evt == 'opponent_disconnected') {
-          setState(() => _oppStatus = 'Reconnecting...');
-        } else if (evt == 'opponent_reconnected') {
-          setState(() => _oppStatus = 'Ready');
         } else if (evt != null && evt.startsWith('sound_')) {
           final soundIdx = int.tryParse(evt.substring(6)) ?? -1;
           if (soundIdx >= 0) GameSoundService.play(soundIdx);
@@ -476,20 +550,23 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     });
   }
 
-  void _startPracticeAI() {
-    Timer.periodic(const Duration(seconds: 2), (t) {
-      if (!mounted || _gameOver) { t.cancel(); return; }
-      final rng = Random();
-      final aiSmile = (0.2 + rng.nextDouble() * 0.6).clamp(0.0, 1.0);
-      setState(() {
-        _oppSmile = aiSmile;
-        _oppStatus = aiSmile > 0.3 ? 'Nervous' : 'Serious';
-      });
-      if (aiSmile > 0.40 && !_gameOver) {
-        _endGame(won: true, reason: 'ai_laughed');
-        t.cancel();
-      }
-    });
+  void _startVoiceChat() async {
+    final roomCode = WsGameService.roomCode;
+    if (roomCode == null) {
+      debugPrint('[VOICE] No room code — voice chat skipped');
+      return;
+    }
+    debugPrint('[VOICE] Starting voice chat in room $roomCode, isHost=${widget.isHost}');
+    final started = await VoiceChatService.startVoiceChat(
+      roomCode: roomCode,
+      isHost: widget.isHost,
+    );
+    if (started) {
+      debugPrint('[VOICE] Voice chat active in room $roomCode');
+      if (mounted) setState(() {});
+    } else {
+      debugPrint('[VOICE] Voice chat failed to start');
+    }
   }
 
   void _startGame() {
@@ -521,6 +598,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
                 if (widget.isFbOnline) { FbOnlineService.sendGameEvent('quit'); }
                 if (widget.isWebSocket) { WsGameService.sendGameEvent('quit'); }
                 if (widget.isLocal) { LocalGameService.sendGameEvent('quit'); }
+                GameSyncService.sendGameEvent(matchId: _matchId, playerId: _myId, event: 'quit');
                 _endGame(won: false, reason: 'quit');
               }
             },
@@ -538,6 +616,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     if (widget.isLocal) LocalGameService.sendGameEvent('sound_$index');
     if (widget.isWebSocket) WsGameService.sendGameEvent('sound_$index');
     if (widget.isFbOnline) FbOnlineService.sendGameEvent('sound_$index');
+    GameSyncService.sendGameEvent(matchId: _matchId, playerId: _myId, event: 'sound_$index');
 
     String msg;
     switch (index) {
@@ -578,13 +657,16 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     }
     _gameEnding = true;
     _gameOver = true;
-    debugPrint('[ENDGAME] Stopping camera...');
+    _consecutiveSmileFrames = 0;
+    debugPrint('[GAME] endGame triggered — winner decided');
     _camera?.stopImageStream();
     debugPrint('[ENDGAME] Cancelling timers...');
     _faceTimer?.cancel();
     _countdownTimer?.cancel();
     debugPrint('[ENDGAME] Stopping detector...');
     _detector.stop();
+    VoiceChatService.stopVoiceChat();
+    debugPrint('[VOICE] Voice chat stopped (game over)');
     _winner = won ? 'You' : widget.opponentName;
     debugPrint('[ENDGAME] Winner set: $_winner');
 
@@ -626,6 +708,7 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
     LocalGameService.dispose();
     FbOnlineService.dispose();
     WsGameService.dispose();
+    VoiceChatService.stopVoiceChat();
     super.dispose();
   }
 
@@ -723,6 +806,33 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
           const SizedBox(width: 8),
           _miniSmile('YOU', _mySmile),
         ]),
+        const SizedBox(width: 4),
+        GestureDetector(
+          onTap: () {
+            VoiceChatService.toggleMute();
+            setState(() {});
+          },
+          child: Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: VoiceChatService.isActive
+                  ? (VoiceChatService.isMuted
+                      ? Colors.red.withAlpha(50)
+                      : Colors.greenAccent.withAlpha(30))
+                  : Colors.white.withAlpha(10),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              VoiceChatService.isMuted || !VoiceChatService.isActive
+                  ? Icons.mic_off
+                  : Icons.mic,
+              size: 18,
+              color: VoiceChatService.isActive && !VoiceChatService.isMuted
+                  ? Colors.greenAccent
+                  : Colors.white30,
+            ),
+          ),
+        ),
         GestureDetector(
           onTap: () => _confirmQuit(),
           child: Container(

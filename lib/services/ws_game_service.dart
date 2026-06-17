@@ -22,6 +22,7 @@ class WsGameService {
   static bool _connected = false;
   static String? _roomCode;
   static String? _playerId;
+  static String? _playerName;
   static String? _playerRole;
   static String? _opponentId;
   static String? _opponentName;
@@ -35,6 +36,7 @@ class WsGameService {
   static bool _isReconnecting = false;
 
   static bool get isConnected => _connected;
+  static bool get isReconnecting => _isReconnecting;
   static String? get roomCode => _roomCode;
   static String? get opponentId => _opponentId;
   static String? get opponentName => _opponentName;
@@ -67,15 +69,15 @@ class WsGameService {
 
       if (isProduction) {
         debugPrint('[WS] Warming up Render server (health check)...');
-        for (int warmup = 0; warmup < 12; warmup++) {
+        for (int warmup = 0; warmup < 10; warmup++) {
           final alive = await AppConfig.checkServerHealth(url: candidate);
           if (alive) {
             debugPrint('[WS] Render server is awake (warmup ${warmup + 1})');
             break;
           }
-          if (warmup < 11) {
-            debugPrint('[WS] Render cold start, waiting 5s...');
-            await Future.delayed(const Duration(seconds: 5));
+          if (warmup < 9) {
+            debugPrint('[WS] Render cold start, waiting 3s...');
+            await Future.delayed(const Duration(seconds: 3));
           }
         }
       }
@@ -155,6 +157,19 @@ class WsGameService {
     });
   }
 
+  // ── Pending events (retry on reconnect) ─────────────────────
+
+  static final List<Map<String, dynamic>> _pendingEvents = [];
+
+  static void _flushPendingEvents() {
+    if (_pendingEvents.isEmpty) return;
+    debugPrint('[WS] Flushing ${_pendingEvents.length} pending events');
+    for (final evt in _pendingEvents.toList()) {
+      _send(evt);
+    }
+    _pendingEvents.clear();
+  }
+
   // ── Auto-reconnect ──────────────────────────────────────────
 
   static void _onDisconnected() {
@@ -204,6 +219,7 @@ class WsGameService {
       );
 
       _startPing();
+      _flushPendingEvents();
 
       if (_roomCode != null && _playerId != null) {
         debugPrint('[WS] Reconnecting to room $_roomCode as $_playerId');
@@ -217,7 +233,7 @@ class WsGameService {
         _send({
           'type': 'matchmaking_join',
           'id': _playerId,
-          'name': _opponentName ?? 'Player',
+          'name': _playerName ?? 'Player',
         });
       } else {
         debugPrint('[WS] No session to resume');
@@ -239,6 +255,7 @@ class WsGameService {
     _dispose();
     _cancelled = false;
     _playerId = playerId;
+    _playerName = playerName;
 
     debugPrint('[WS] === joinMatchmakingQueue START ===');
     debugPrint('[WS] Player: $playerName ($playerId)');
@@ -317,9 +334,9 @@ class WsGameService {
 
       if (type == 'error') {
         debugPrint('[WS] Server error: ${msg['message']}');
-        if (!completer.isCompleted) {
-          completer.complete(null);
-        }
+        try {
+          if (!completer.isCompleted) completer.complete(null);
+        } catch (_) {}
         return;
       }
 
@@ -329,7 +346,17 @@ class WsGameService {
       }
     });
 
-    final result = await completer.future;
+    final result = await completer.future.timeout(
+      const Duration(seconds: 60),
+      onTimeout: () {
+        debugPrint('[WS] Matchmaking timed out after 60s');
+        sub?.cancel();
+        _cancelled = true;
+        _inQueue = false;
+        leaveMatchmakingQueue();
+        return null;
+      },
+    );
     sub?.cancel();
 
     if (result == null) {
@@ -384,7 +411,7 @@ class WsGameService {
     });
 
     final result = await completer.future.timeout(
-      const Duration(seconds: 5),
+      const Duration(seconds: 10),
       onTimeout: () {
         debugPrint('[WS] hostRoom timed out');
         return null;
@@ -437,7 +464,7 @@ class WsGameService {
 
     try {
       return await completer.future.timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 10),
         onTimeout: () {
           debugPrint('[WS] joinRoom timed out');
           return false;
@@ -469,6 +496,11 @@ class WsGameService {
 
       if (type == 'opponent_disconnected') {
         debugPrint('[WS] Opponent disconnected — waiting for reconnect');
+      }
+
+      if (type == 'voice') {
+        final sig = msg['signal'] as Map<String, dynamic>?;
+        debugPrint('[VOICE] Signaling received: ${sig?['type'] ?? 'unknown'}');
       }
 
       _controller.add(msg);
@@ -506,7 +538,39 @@ class WsGameService {
   }
 
   static void sendGameEvent(String event) {
-    _send({'type': 'event', 'event': event});
+    final msg = <String, dynamic>{
+      'type': 'event',
+      'event': event,
+      if (_playerId != null) 'playerId': _playerId,
+      if (_roomCode != null) 'roomCode': _roomCode,
+    };
+    if (_ws != null && _ws!.readyState == WebSocket.open) {
+      _send(msg);
+    } else {
+      debugPrint('[WS] Socket not open — buffering event: $event');
+      _pendingEvents.add(msg);
+      if (!_isReconnecting) {
+        _onDisconnected();
+      }
+    }
+  }
+
+  static void sendVoiceSignal(Map<String, dynamic> signal) {
+    final msg = <String, dynamic>{
+      'type': 'voice',
+      'signal': signal,
+      if (_playerId != null) 'playerId': _playerId,
+      if (_roomCode != null) 'roomCode': _roomCode,
+    };
+    if (_ws != null && _ws!.readyState == WebSocket.open) {
+      _send(msg);
+    } else {
+      debugPrint('[WS] Socket not open — buffering voice signal: ${signal['type']}');
+      _pendingEvents.add(msg);
+      if (!_isReconnecting) {
+        _onDisconnected();
+      }
+    }
   }
 
   // ── Cleanup ─────────────────────────────────────────────────
@@ -530,9 +594,11 @@ class WsGameService {
     _playerRole = null;
     _opponentId = null;
     _opponentName = null;
+    _pendingEvents.clear();
     _disposeSocket();
     _roomCode = null;
     _playerId = null;
+    _playerName = null;
     debugPrint('[WS] Disposed');
   }
 

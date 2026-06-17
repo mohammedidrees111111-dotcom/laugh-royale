@@ -193,6 +193,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.9"
+  dart_webrtc:
+    dependency: transitive
+    description:
+      name: dart_webrtc
+      sha256: ac7ef077084b3e54004716f1d736fcd839e1b60bc3f21f4122a35a9bb5ca2e47
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.4.8"
   dbus:
     dependency: transitive
     description:
@@ -384,6 +392,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_webrtc:
+    dependency: "direct main"
+    description:
+      name: flutter_webrtc
+      sha256: f46bd76cef6e8d787dc707d0c591f0e89c912a2970c7b5e68a55b9cca1bdde4c
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.11.6"
   google_fonts:
     dependency: "direct main"
     description:
@@ -408,14 +424,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.8.1"
-  google_mlkit_face_detection:
+  google_mlkit_face_mesh_detection:
     dependency: "direct main"
     description:
-      name: google_mlkit_face_detection
-      sha256: "0aeab4f39204f7a235ed4cccedfe7e61401b43f4ef139a868c01fa29fdc225ab"
+      name: google_mlkit_face_mesh_detection
+      sha256: a5a1c671ef58b4e4adb891e86f1040658dbaae2087523c7d6650f2124ab4f7c2
       url: "https://pub.dev"
     source: hosted
-    version: "0.11.1"
+    version: "0.2.1"
   google_sign_in:
     dependency: "direct main"
     description:
@@ -568,6 +584,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.1"
+  js:
+    dependency: transitive
+    description:
+      name: js
+      sha256: "53385261521cc4a0c4658fd0ad07a7d14591cf8fc33abbceae306ddb974888dc"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.7.2"
   leak_tracker:
     dependency: transitive
     description:
@@ -800,6 +824,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.6"
+  platform_detect:
+    dependency: transitive
+    description:
+      name: platform_detect
+      sha256: "6e91e2158b9db7f6f4581a0f0b3a77171570b392108de196ba0c52e3c1976334"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.1.6"
   plugin_platform_interface:
     dependency: transitive
     description:
@@ -1133,6 +1165,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.5.1"
+  webrtc_interface:
+    dependency: transitive
+    description:
+      name: webrtc_interface
+      sha256: c6f100eac5057d9a817a60473126f9828c796d42884d498af4f339c97b21014f
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.5.1"
   xdg_directories:
     dependency: transitive
     description:

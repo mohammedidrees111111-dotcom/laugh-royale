@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'config/app_config.dart';
 import 'config/theme.dart';
 import 'l10n/localization.dart';
+import 'services/language_service.dart';
 import 'screens/home_screen.dart';
 import 'screens/feed_screen.dart';
 import 'screens/create_screen.dart';
@@ -29,21 +30,42 @@ class LaughRoyaleApp extends StatefulWidget {
 class _LaughRoyaleAppState extends State<LaughRoyaleApp> {
   bool _initialized = false;
   bool _hasError = false;
-  bool _firebaseOk = false;
   bool _isLoggedIn = false;
   Locale _locale = const Locale('en');
+  ThemeMode _themeMode = ThemeMode.dark;
 
   @override
   void initState() {
     super.initState();
+    LanguageService.init().then((_) {
+      if (mounted) setState(() => _locale = LanguageService.localeNotifier.value);
+    });
+    LanguageService.localeNotifier.addListener(_onLocaleChanged);
+    AppTheme.darkModeNotifier.addListener(_onThemeChanged);
     _initializeApp();
+  }
+
+  void _onLocaleChanged() {
+    if (mounted) setState(() => _locale = LanguageService.localeNotifier.value);
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() => _themeMode = AppTheme.darkModeNotifier.value ? ThemeMode.dark : ThemeMode.light);
+  }
+
+  @override
+  void dispose() {
+    LanguageService.localeNotifier.removeListener(_onLocaleChanged);
+    AppTheme.darkModeNotifier.removeListener(_onThemeChanged);
+    super.dispose();
   }
 
   Future<void> _initializeApp() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final lang = prefs.getString('language') ?? 'en';
-      if (lang == 'ar') _locale = const Locale('ar');
+      final isDark = prefs.getBool('darkMode') ?? true;
+      if (mounted) setState(() => _themeMode = isDark ? ThemeMode.dark : ThemeMode.light);
+      AppTheme.darkModeNotifier.value = isDark;
 
       final fbOk = await FirebaseService.safeInitialize();
       debugPrint('APP: Firebase initialized → $fbOk');
@@ -124,7 +146,7 @@ class _LaughRoyaleAppState extends State<LaughRoyaleApp> {
       supportedLocales: const [Locale('en'), Locale('ar')],
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.dark,
+      themeMode: _themeMode,
       home: _isLoggedIn ? const MainShell() : const LoginScreen(),
       routes: {
         '/country': (ctx) => const CountrySelectScreen(),
@@ -147,12 +169,12 @@ class _MainShellState extends State<MainShell> {
   int _currentIndex = 0;
 
   late final List<Widget> _screens = [
-    const HomeScreen(),
-    const FeedScreen(),
-    const CreateScreen(),
-    const LobbyScreen(),
-    const StoreScreen(),
-    const SettingsScreen(),
+    HomeScreen(),
+    FeedScreen(),
+    CreateScreen(),
+    LobbyScreen(),
+    StoreScreen(),
+    SettingsScreen(),
   ];
 
   @override

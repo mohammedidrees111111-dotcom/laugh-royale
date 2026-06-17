@@ -61,6 +61,16 @@
 -keep class org.webrtc.** { *; }
 -dontwarn org.webrtc.**
 
+# ── WebRTC native JNI methods ────────────────────────────
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+-keep class org.webrtc.voiceengine.** { *; }
+-keep class org.webrtc.audio.** { *; }
+-dontwarn org.webrtc.voiceengine.**
+-keep class io.flutter.plugins.webrtc.** { *; }
+-dontwarn io.flutter.plugins.webrtc.**
+
 # ── Image/Media Libraries ────────────────────────────────
 -keep class com.bumptech.glide.** { *; }
 -dontwarn com.bumptech.glide.**

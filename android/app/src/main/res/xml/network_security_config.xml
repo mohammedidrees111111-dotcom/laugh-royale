@@ -7,6 +7,17 @@
         <domain includeSubdomains="true">127.0.0.1</domain>
     </domain-config>
 
+    <!-- Render.com WebSocket server (WSS) -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">onrender.com</domain>
+    </domain-config>
+
+    <!-- Metered.ca TURN servers -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">metered.ca</domain>
+        <domain includeSubdomains="true">expressturn.com</domain>
+    </domain-config>
+
     <!-- Firebase domains - allow all HTTPS -->
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="true">firebaseio.com</domain>
@@ -21,8 +32,8 @@
         <domain includeSubdomains="true">ngrok.io</domain>
     </domain-config>
 
-    <!-- Default: allow cleartext for all other domains -->
-    <base-config cleartextTrafficPermitted="true">
+    <!-- Default: allow cleartext only for dev, HTTPS for all else -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

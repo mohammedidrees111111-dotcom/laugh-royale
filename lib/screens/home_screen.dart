@@ -1,14 +1,16 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../l10n/localization.dart';
 import '../services/auth_service.dart';
 import '../services/error_handler.dart';
+import '../services/firebase_service.dart';
 import '../widgets/error_fallback.dart';
 import 'lobby/lobby_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
-
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -81,9 +83,9 @@ class _HomeScreenState extends State<HomeScreen> {
           const SizedBox(height: 12),
           _buildQuickActions(l, theme),
           const SizedBox(height: 24),
-          _sectionHeader('Trending'),
+          _sectionHeader('Your Stats'),
           const SizedBox(height: 12),
-          _buildTrendingList(l),
+          _buildStatsGrid(),
           const SizedBox(height: 80),
         ],
       ),
@@ -109,6 +111,34 @@ class _HomeScreenState extends State<HomeScreen> {
             ]),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildStatsGrid() {
+    final winRate = _stats['total'] != null && _stats['total']! > 0
+        ? (_stats['wins']! / _stats['total']! * 100).toStringAsFixed(0)
+        : '0';
+    return Row(children: [
+      Expanded(child: _statCard('\ud83c\udfaf', '$winRate%', 'Win Rate', const Color(0xFF00E676))),
+      const SizedBox(width: 10),
+      Expanded(child: _statCard('\ud83d\udd25', '${_stats['wins'] ?? 0}', 'Total Wins', Colors.amber)),
+      const SizedBox(width: 10),
+      Expanded(child: _statCard('\ud83c\udfae', '${_stats['total'] ?? 0}', 'Games', const Color(0xFF6C63FF))),
+    ]);
+  }
+
+  Widget _statCard(String emoji, String value, String label, Color color) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(children: [
+          Text(emoji, style: const TextStyle(fontSize: 28)),
+          const SizedBox(height: 6),
+          Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: color)),
+          const SizedBox(height: 2),
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+        ]),
       ),
     );
   }
@@ -156,109 +186,153 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildTrendingList(L l) {
-    final items = [
-      {'title': 'Top Players Today', 'subtitle': 'See who\'s dominating the leaderboard', 'icon': '\ud83d\udd25'},
-      {'title': 'Funniest Moments', 'subtitle': 'Best laugh fails of the week', 'icon': '\ud83d\ude02'},
-      {'title': 'Challenge of the Day', 'subtitle': 'Special daily challenge - win gems', 'icon': '\ud83d\udc9b'},
-      {'title': 'New Emotes', 'subtitle': 'Check out the latest reactions', 'icon': '\ud83c\udfad'},
-    ];
-
-    return Column(
-      children: items.asMap().entries.map((entry) {
-        final item = entry.value;
-        return Card(
-          margin: const EdgeInsets.only(bottom: 8),
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.15),
-              child: Text(item['icon']!, style: const TextStyle(fontSize: 20)),
-            ),
-            title: Text(item['title']!, style: const TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: Text(item['subtitle']!),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showSnack('${item['title']} coming soon!'),
-          ),
-        );
-      }).toList(),
-    );
-  }
-
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
   }
 }
 
-class LeaderboardScreen extends StatelessWidget {
+class LeaderboardScreen extends StatefulWidget {
   const LeaderboardScreen({super.key});
+  @override
+  State<LeaderboardScreen> createState() => _LeaderboardScreenState();
+}
+
+class _LeaderboardScreenState extends State<LeaderboardScreen> {
+  List<Map<String, dynamic>> _players = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLeaderboard();
+  }
+
+  Future<void> _loadLeaderboard() async {
+    final currentId = AuthService.currentUserId;
+    final prefs = await SharedPreferences.getInstance();
+    final myWins = prefs.getInt('wins') ?? 0;
+
+    final db = FirebaseService.firestore;
+    if (db != null) {
+      try {
+        final snapshot = await db.collection('leaderboard')
+            .orderBy('wins', descending: true)
+            .limit(50)
+            .get();
+        final list = snapshot.docs.map((doc) {
+          final data = doc.data();
+          return {
+            'name': data['name'] ?? 'Player',
+            'wins': data['wins'] ?? 0,
+            'isYou': doc.id == currentId,
+          };
+        }).toList();
+
+        if (mounted) setState(() { _players = list; _loading = false; });
+        return;
+      } catch (_) {}
+    }
+
+    _players = [
+      {'name': AuthService.displayName, 'wins': myWins, 'isYou': true},
+    ];
+    _players.sort((a, b) => (b['wins'] as int).compareTo(a['wins'] as int));
+    if (mounted) setState(() => _loading = false);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final players = [
-      {'name': 'LaughKing', 'wins': 342, 'flag': '\ud83c\uddf8\ud83c\udde6'},
-      {'name': 'SmileQueen', 'wins': 298, 'flag': '\ud83c\uddfa\ud83c\uddf8'},
-      {'name': 'JokeMaster', 'wins': 256, 'flag': '\ud83c\uddec\ud83c\udde7'},
-      {'name': 'ChucklePro', 'wins': 221, 'flag': '\ud83c\uddee\ud83c\uddf3'},
-      {'name': 'FunnyGuy', 'wins': 198, 'flag': '\ud83c\uddf2\ud83c\udde6'},
-      {'name': 'HaHaHero', 'wins': 175, 'flag': '\ud83c\udde6\ud83c\uddea'},
-      {'name': 'GiggleStar', 'wins': 152, 'flag': '\ud83c\uddf5\ud83c\uddf8'},
-      {'name': 'WitWizard', 'wins': 134, 'flag': '\ud83c\udde9\ud83c\uddea'},
-      {'name': 'PrankLord', 'wins': 118, 'flag': '\ud83c\uddf3\ud83c\uddec'},
-      {'name': 'MemeKing', 'wins': 99, 'flag': '\ud83c\uddf9\ud83c\uddf7'},
-      {'name': 'You', 'wins': 42, 'flag': '\ud83c\uddf5\ud83c\uddf8', 'isYou': true},
-    ];
-
     return Scaffold(
       appBar: AppBar(title: const Text('Leaderboard')),
-      body: ListView.builder(
-        padding: const EdgeInsets.all(16),
-        itemCount: players.length,
-        itemBuilder: (ctx, i) {
-          final p = players[i];
-          final isYou = p['isYou'] == true;
-          final rankColor = i == 0 ? const Color(0xFFFFD700) : i == 1 ? const Color(0xFFC0C0C0) : i == 2 ? const Color(0xFFCD7F32) : Colors.white;
-          return Card(
-            margin: const EdgeInsets.only(bottom: 8),
-            color: isYou ? const Color(0xFF6C63FF).withOpacity(0.15) : null,
-            child: ListTile(
-              leading: Container(
-                width: 36, height: 36,
-                decoration: BoxDecoration(
-                  color: isYou ? const Color(0xFF6C63FF).withOpacity(0.2) : Colors.white10,
-                  borderRadius: BorderRadius.circular(10),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _players.isEmpty
+              ? const Center(child: Text('No players yet. Play games to rank!', style: TextStyle(color: Colors.white54)))
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _players.length,
+                  itemBuilder: (ctx, i) {
+                    final p = _players[i];
+                    final isYou = p['isYou'] == true;
+                    final rankColor = i == 0
+                        ? const Color(0xFFFFD700)
+                        : i == 1
+                            ? const Color(0xFFC0C0C0)
+                            : i == 2
+                                ? const Color(0xFFCD7F32)
+                                : Colors.white;
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      color: isYou ? const Color(0xFF6C63FF).withOpacity(0.15) : null,
+                      child: ListTile(
+                        leading: Container(
+                          width: 36, height: 36,
+                          decoration: BoxDecoration(
+                            color: isYou ? const Color(0xFF6C63FF).withOpacity(0.2) : Colors.white10,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Center(child: Text('${i + 1}', style: TextStyle(fontWeight: FontWeight.bold, color: rankColor))),
+                        ),
+                        title: Text(p['name'] as String, style: TextStyle(fontWeight: FontWeight.w600, color: isYou ? const Color(0xFF6C63FF) : Colors.white)),
+                        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.emoji_events, size: 16, color: Colors.amber),
+                          const SizedBox(width: 4),
+                          Text('${p['wins']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        ]),
+                      ),
+                    );
+                  },
                 ),
-                child: Center(child: Text('${i + 1}', style: TextStyle(fontWeight: FontWeight.bold, color: rankColor))),
-              ),
-              title: Row(children: [
-                Text(p['flag'] as String, style: const TextStyle(fontSize: 16)),
-                const SizedBox(width: 8),
-                Text(p['name'] as String, style: TextStyle(fontWeight: FontWeight.w600, color: isYou ? const Color(0xFF6C63FF) : Colors.white)),
-                if (isYou) const Text(' (You)', style: TextStyle(fontSize: 12, color: Color(0xFF6C63FF))),
-              ]),
-              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.emoji_events, size: 16, color: Colors.amber),
-                const SizedBox(width: 4),
-                Text('${p['wins']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              ]),
-            ),
-          );
-        },
-      ),
     );
   }
 }
 
-class RewardsScreen extends StatelessWidget {
+class RewardsScreen extends StatefulWidget {
   const RewardsScreen({super.key});
+  @override
+  State<RewardsScreen> createState() => _RewardsScreenState();
+}
+
+class _RewardsScreenState extends State<RewardsScreen> {
+  Map<String, int> _stats = {};
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStats();
+  }
+
+  Future<void> _loadStats() async {
+    final prefs = await SharedPreferences.getInstance();
+    _stats = {
+      'wins': prefs.getInt('wins') ?? 0,
+      'losses': prefs.getInt('losses') ?? 0,
+      'total': prefs.getInt('totalGames') ?? 0,
+      'gems': prefs.getInt('gems') ?? 0,
+    };
+    if (mounted) setState(() => _loading = false);
+  }
+
+  int _calcGems() {
+    return (_stats['wins'] ?? 0) * 10 + (_stats['total'] ?? 0) * 2;
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (_loading) {
+      return Scaffold(appBar: AppBar(title: const Text('Rewards')), body: const Center(child: CircularProgressIndicator()));
+    }
+
+    final gems = _stats['gems']! > 0 ? _stats['gems']! : _calcGems();
+    final totalGames = _stats['total'] ?? 0;
+    final wins = _stats['wins'] ?? 0;
+
     final rewards = [
-      {'title': 'Daily Login', 'desc': 'Log in every day for 7 days', 'reward': '100 Gems', 'icon': '\ud83c\udf1f', 'progress': 0.7},
-      {'title': 'Win 5 Matches', 'desc': 'Win 5 multiplayer games', 'reward': '250 Gems', 'icon': '\ud83c\udfc6', 'progress': 0.4},
-      {'title': 'Make 3 Players Laugh', 'desc': 'Use actions to make opponents laugh', 'reward': '150 Gems', 'icon': '\ud83d\ude02', 'progress': 0.9},
-      {'title': 'Play 20 Games', 'desc': 'Complete 20 total games', 'reward': '500 Gems', 'icon': '\ud83c\udfae', 'progress': 0.25},
-      {'title': 'Share the App', 'desc': 'Invite 3 friends to play', 'reward': '300 Gems', 'icon': '\ud83d\udc8c', 'progress': 0.0},
+      {'title': 'Win 5 Matches', 'desc': 'Win 5 multiplayer games', 'reward': '250 Gems', 'icon': '\ud83c\udfc6', 'progress': (wins / 5).clamp(0.0, 1.0)},
+      {'title': 'Play 20 Games', 'desc': 'Complete 20 total games', 'reward': '500 Gems', 'icon': '\ud83c\udfae', 'progress': (totalGames / 20).clamp(0.0, 1.0)},
+      {'title': 'Win Streak', 'desc': 'Win 3 games in a row', 'reward': '150 Gems', 'icon': '\ud83d\udd25', 'progress': (wins >= 3 ? 1.0 : wins / 3)},
+      {'title': 'Play Daily', 'desc': 'Play at least 1 game today', 'reward': '50 Gems', 'icon': '\ud83c\udf1f', 'progress': totalGames > 0 ? 1.0 : 0.0},
     ];
 
     return Scaffold(
@@ -284,10 +358,10 @@ class RewardsScreen extends StatelessWidget {
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                     decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), borderRadius: BorderRadius.circular(20)),
-                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.diamond, color: Colors.white, size: 18),
-                      SizedBox(width: 6),
-                      Text('1,250 Gems', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.diamond, color: Colors.white, size: 18),
+                      const SizedBox(width: 6),
+                      Text('$gems Gems', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
                     ]),
                   ),
                 ]),

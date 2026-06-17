@@ -3,11 +3,18 @@ const WebSocket = require('ws');
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
+const HEARTBEAT_INTERVAL = 30000;
+const HEARTBEAT_TIMEOUT = 10000;
+const ROOM_SWEEP_INTERVAL = 60000;
+const MAX_CONNECTIONS = 500;
+const MAX_PAYLOAD = 65536;
+const MAX_MSG_PER_SEC = 15;
 
 const rooms = new Map();
 const matchmakingQueue = [];
 const connStateMap = new Map();
 const roomCleanupTimers = new Map();
+let shuttingDown = false;
 
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -23,12 +30,37 @@ function log(level, ...args) {
 
 function send(ws, obj) {
   if (ws.readyState !== WebSocket.OPEN) return;
-  try { ws.send(JSON.stringify(obj)); } catch (_) {}
+  try { ws.send(JSON.stringify(obj)); } catch (e) {
+    log('SEND_ERR', `Failed to send to ${connStateMap.get(ws)?.playerId || '?'}: ${e.message}`);
+  }
 }
 
 function cancelCleanupTimer(roomCode) {
   const t = roomCleanupTimers.get(roomCode);
   if (t) { clearTimeout(t); roomCleanupTimers.delete(roomCode); }
+}
+
+function getOpponentName(ws, room) {
+  if (!room) return 'Player';
+  const cs = connStateMap.get(ws);
+  if (!cs) return 'Player';
+  if (cs.role === 'host') {
+    const guestCs = connStateMap.get(room.guest);
+    return guestCs?.playerName || 'Player';
+  }
+  const hostCs = connStateMap.get(room.host);
+  return hostCs?.playerName || 'Player';
+}
+
+function getOpponent(ws, room) {
+  if (!room) return null;
+  if (ws === room.host) return room.guest;
+  if (ws === room.guest) return room.host;
+  const cs = connStateMap.get(ws);
+  if (cs && cs.role === 'host') return room.guest;
+  if (cs && cs.role === 'guest') return room.host;
+  const target = ws === room.host ? room.guest : ws === room.guest ? room.host : null;
+  return target && target.readyState === WebSocket.OPEN ? target : null;
 }
 
 function removeFromQueue(ws) {
@@ -49,7 +81,7 @@ function cleanupRoom(ws) {
   if (!room) return;
 
   const roomCode = cs.roomCode;
-  const other = (cs.role === 'host') ? room.guest : room.host;
+  const other = getOpponent(ws, room);
   if (other && other.readyState === WebSocket.OPEN) {
     send(other, { type: 'opponent_disconnected' });
   }
@@ -61,7 +93,9 @@ function cleanupRoom(ws) {
     const hostAlive = currentRoom.host && currentRoom.host.readyState === WebSocket.OPEN;
     const guestAlive = currentRoom.guest && currentRoom.guest.readyState === WebSocket.OPEN;
     if (!hostAlive && !guestAlive) {
-      const age = ((Date.now() - (currentRoom.createdAt || Date.now())) / 1000).toFixed(0);
+      const age = currentRoom.createdAt
+        ? ((Date.now() - currentRoom.createdAt) / 1000).toFixed(0)
+        : '?';
       rooms.delete(roomCode);
       roomCleanupTimers.delete(roomCode);
       log('ROOM', `Room ${roomCode} expired (age: ${age}s, both left)`);
@@ -70,6 +104,49 @@ function cleanupRoom(ws) {
   roomCleanupTimers.set(roomCode, timer);
 
   log('ROOM', `Player ${cs.role} left room ${roomCode} (reconnect window: 30s)`);
+}
+
+function sweepGhostRooms() {
+  const now = Date.now();
+  for (const [code, room] of rooms) {
+    const hostAlive = room.host && room.host.readyState === WebSocket.OPEN;
+    const guestAlive = room.guest && room.guest.readyState === WebSocket.OPEN;
+    if (!hostAlive && !guestAlive) {
+      rooms.delete(code);
+      roomCleanupTimers.delete(code);
+      log('SWEEP', `Ghost room ${code} removed (no live players)`);
+    } else if (hostAlive && !guestAlive) {
+      const age = (now - (room.createdAt || now)) / 1000;
+      if (age > 120) {
+        if (room.host) {
+          connStateMap.delete(room.host);
+          try { room.host.terminate(); } catch (_) {}
+        }
+        if (room.guest) {
+          connStateMap.delete(room.guest);
+          try { room.guest.terminate(); } catch (_) {}
+        }
+        rooms.delete(code);
+        roomCleanupTimers.delete(code);
+        log('SWEEP', `Stale room ${code} removed (age: ${age.toFixed(0)}s, only host alive)`);
+      }
+    } else if (guestAlive && !hostAlive) {
+      const age = (now - (room.createdAt || now)) / 1000;
+      if (age > 120) {
+        if (room.host) {
+          connStateMap.delete(room.host);
+          try { room.host.terminate(); } catch (_) {}
+        }
+        if (room.guest) {
+          connStateMap.delete(room.guest);
+          try { room.guest.terminate(); } catch (_) {}
+        }
+        rooms.delete(code);
+        roomCleanupTimers.delete(code);
+        log('SWEEP', `Stale room ${code} removed (age: ${age.toFixed(0)}s, only guest alive)`);
+      }
+    }
+  }
 }
 
 function tryPair() {
@@ -86,6 +163,13 @@ function tryPair() {
 
     const c1 = connStateMap.get(p1);
     const c2 = connStateMap.get(p2);
+    if (!c1 || !c2) continue;
+
+    if (c1.playerId === c2.playerId) {
+      matchmakingQueue.unshift(p2);
+      log('PAIR', 'Skipped same-player pairing');
+      continue;
+    }
 
     const roomCode = generateCode();
 
@@ -102,8 +186,8 @@ function tryPair() {
       createdAt: Date.now(),
     });
 
-    send(p1, { type: 'matched', roomId: roomCode, opponentId: c2.playerId, opponentName: c2.playerName, role: 'host' });
-    send(p2, { type: 'matched', roomId: roomCode, opponentId: c1.playerId, opponentName: c1.playerName, role: 'guest' });
+    send(p1, { type: 'matched', roomId: roomCode, opponentId: c2.playerId, opponentName: c2.playerName || 'Player', role: 'host' });
+    send(p2, { type: 'matched', roomId: roomCode, opponentId: c1.playerId, opponentName: c1.playerName || 'Player', role: 'guest' });
 
     log('MATCH', `Paired ${c1.playerName}[${c1.playerId}] vs ${c2.playerName}[${c2.playerId}] in room ${roomCode}`);
     log('QUEUE', `Queue size: ${matchmakingQueue.length}`);
@@ -122,13 +206,17 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/')) {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const wssReady = wss && wss.clients ? true : false;
+    const memoryUsage = process.memoryUsage();
+    res.writeHead(wssReady ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: 'ok',
+      status: wssReady && !shuttingDown ? 'ok' : 'degraded',
       uptime: process.uptime(),
       rooms: rooms.size,
       queue: matchmakingQueue.length,
       clients: connStateMap.size,
+      shuttingDown: shuttingDown,
+      memoryMB: Math.round(memoryUsage.heapUsed / 1048576),
       timestamp: new Date().toISOString(),
     }));
     return;
@@ -138,26 +226,58 @@ const httpServer = http.createServer((req, res) => {
   res.end();
 });
 
-const wss = new WebSocket.Server({ server: httpServer });
+const wss = new WebSocket.Server({
+  server: httpServer,
+  maxPayload: MAX_PAYLOAD,
+});
+
+let connectCount = 0;
 
 wss.on('connection', (ws, req) => {
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-  log('CONNECT', `Client connected from ${clientIp}`);
+  connectCount++;
+  if (connectCount > MAX_CONNECTIONS) {
+    ws.close(1013, 'Server full');
+    connectCount--;
+    log('REJECT', 'Connection refused: server full');
+    return;
+  }
 
-  const cs = { roomCode: null, role: null, playerId: null, playerName: null };
+  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  log('CONNECT', `Client connected from ${clientIp} (total: ${connectCount})`);
+
+  const cs = {
+    roomCode: null,
+    role: null,
+    playerId: null,
+    playerName: null,
+    lastMsgTime: 0,
+    msgCount: 0,
+  };
   connStateMap.set(ws, cs);
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   send(ws, { type: 'connected', message: 'Welcome to Laugh Royale!', serverTime: Date.now() });
 
   ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw); } catch (e) {
-      log('ERROR', 'Invalid JSON received');
-      send(ws, { type: 'error', message: 'Invalid message format' });
+    const now = Date.now();
+    if (now - cs.lastMsgTime > 1000) {
+      cs.lastMsgTime = now;
+      cs.msgCount = 0;
+    }
+    cs.msgCount++;
+    if (cs.msgCount > MAX_MSG_PER_SEC) {
+      log('RATE', `Rate limit hit for ${cs.playerId || '?'} (${cs.msgCount} msg/s)`);
       return;
     }
 
-    log('MSG', `${cs.role || '?'} → ${msg.type}`);
+    let msg;
+    try { msg = JSON.parse(raw); } catch (e) {
+      log('ERROR', `Invalid JSON from ${cs.playerId || '?'}: ${e.message}`);
+      send(ws, { type: 'error', message: 'Invalid message format' });
+      return;
+    }
 
     switch (msg.type) {
 
@@ -188,9 +308,32 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          if (cs.roomCode) {
+          if (cs.roomCode && !shuttingDown) {
+            const existingRoom = rooms.get(cs.roomCode);
+            if (existingRoom) {
+              if (existingRoom.hostId === pid) {
+                const oldWs = existingRoom.host;
+                if (oldWs && oldWs !== ws) {
+                  connStateMap.delete(oldWs);
+                  try { oldWs.terminate(); } catch (_) {}
+                }
+                existingRoom.host = ws;
+              } else if (existingRoom.guestId === pid) {
+                const oldWs = existingRoom.guest;
+                if (oldWs && oldWs !== ws) {
+                  connStateMap.delete(oldWs);
+                  try { oldWs.terminate(); } catch (_) {}
+                }
+                existingRoom.guest = ws;
+              }
+              cancelCleanupTimer(cs.roomCode);
+              cs.role = existingRoom.hostId === pid ? 'host' : 'guest';
+              log('RECONNECT', `${cs.role} ${pid} rebinded WebSocket to room ${cs.roomCode}`);
+            }
+            const oppName = getOpponentName(ws, existingRoom);
             send(ws, { type: 'reconnected', roomId: cs.roomCode, role: cs.role,
-              opponentId: cs.role === 'host' ? (rooms.get(cs.roomCode)?.guestId) : (rooms.get(cs.roomCode)?.hostId) });
+              opponentId: existingRoom ? (existingRoom.hostId === pid ? existingRoom.guestId : existingRoom.hostId) : null,
+              opponentName: oppName });
             return;
           }
 
@@ -206,35 +349,41 @@ wss.on('connection', (ws, req) => {
 
           if (room.hostId === pid) {
             const oldWs = room.host;
-            if (oldWs && oldWs !== ws && oldWs.readyState !== WebSocket.OPEN) {
-              try { oldWs.terminate(); } catch (_) {}
+            if (oldWs && oldWs !== ws) {
               connStateMap.delete(oldWs);
+              try { oldWs.terminate(); } catch (_) {}
             }
             room.host = ws;
             cs.role = 'host';
             cs.playerId = pid;
             cs.roomCode = rid;
+            const nameMsg = msg.playerName;
+            if (nameMsg) cs.playerName = nameMsg;
             if (room.guest && room.guest.readyState === WebSocket.OPEN) {
               send(room.guest, { type: 'opponent_reconnected' });
             }
+            const oppName = getOpponentName(ws, room);
             send(ws, { type: 'reconnected', roomId: rid, role: 'host',
-              opponentId: room.guestId, opponentName: room.guestId });
+              opponentId: room.guestId, opponentName: oppName });
             log('RECONNECT', `Host ${pid} reconnected to room ${rid}`);
           } else if (room.guestId === pid) {
             const oldWs = room.guest;
-            if (oldWs && oldWs !== ws && oldWs.readyState !== WebSocket.OPEN) {
-              try { oldWs.terminate(); } catch (_) {}
+            if (oldWs && oldWs !== ws) {
               connStateMap.delete(oldWs);
+              try { oldWs.terminate(); } catch (_) {}
             }
             room.guest = ws;
             cs.role = 'guest';
             cs.playerId = pid;
             cs.roomCode = rid;
+            const nameMsg = msg.playerName;
+            if (nameMsg) cs.playerName = nameMsg;
             if (room.host && room.host.readyState === WebSocket.OPEN) {
               send(room.host, { type: 'opponent_reconnected' });
             }
+            const oppName = getOpponentName(ws, room);
             send(ws, { type: 'reconnected', roomId: rid, role: 'guest',
-              opponentId: room.hostId, opponentName: room.hostId });
+              opponentId: room.hostId, opponentName: oppName });
             log('RECONNECT', `Guest ${pid} reconnected to room ${rid}`);
           } else {
             send(ws, { type: 'error', message: 'Not a member of this room' });
@@ -251,11 +400,12 @@ wss.on('connection', (ws, req) => {
         cs.roomCode = generateCode();
         cs.role = 'host';
         cs.playerId = msg.id || 'host';
+        cs.playerName = msg.name || 'Host';
         rooms.set(cs.roomCode, {
           host: ws, guest: null, hostId: cs.playerId, guestId: null, createdAt: Date.now(),
         });
         send(ws, { type: 'room_created', code: cs.roomCode });
-        log('ROOM', `Created ${cs.roomCode} by host ${cs.playerId}`);
+        log('ROOM', `Created ${cs.roomCode} by host ${cs.playerName}`);
         break;
 
       case 'join':
@@ -268,28 +418,52 @@ wss.on('connection', (ws, req) => {
           const jc = msg.code;
           const jr = rooms.get(jc);
           if (!jr) { send(ws, { type: 'error', message: 'Room not found' }); return; }
-          if (jr.guest) { send(ws, { type: 'error', message: 'Room is full' }); return; }
+          if (jr.guest && jr.guest.readyState === WebSocket.OPEN) {
+            send(ws, { type: 'error', message: 'Room is full' });
+            return;
+          }
           cs.roomCode = jc;
           cs.role = 'guest';
           cs.playerId = msg.id || 'guest';
           cs.playerName = msg.name || 'Player';
           jr.guest = ws;
           jr.guestId = cs.playerId;
+          const hostCs = connStateMap.get(jr.host);
+          const hostName = hostCs?.playerName || 'Host';
           send(jr.host, { type: 'player_joined', id: cs.playerId, name: cs.playerName });
-          send(ws, { type: 'joined', id: jr.hostId, name: jr.hostId });
-          log('JOIN', `Player ${cs.playerId} joined room ${jc}`);
+          send(ws, { type: 'joined', id: jr.hostId, name: hostName });
+          log('JOIN', `Player ${cs.playerName} joined room ${jc}`);
         }
         break;
 
       case 'start':
         {
           const r = rooms.get(cs.roomCode);
-          if (r) {
-            const target = cs.role === 'host' ? r.guest : r.host;
-            if (target && target.readyState === WebSocket.OPEN) {
-              send(target, { type: 'event', event: 'started' });
-              log('GAME', `Game started in room ${cs.roomCode} by ${cs.role}`);
-            }
+          if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
+          const target = getOpponent(ws, r);
+          if (target && target.readyState === WebSocket.OPEN) {
+            send(target, { type: 'event', event: 'started' });
+            log('GAME', `Game started in room ${cs.roomCode} by ${cs.role}`);
+          } else {
+            log('GAME', `Game start in room ${cs.roomCode} — opponent not available`);
+          }
+        }
+        break;
+
+      case 'voice':
+      case 'voice_offer':
+      case 'voice_answer':
+      case 'voice_ice':
+        {
+          const r = rooms.get(cs.roomCode);
+          if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
+          const target = getOpponent(ws, r);
+          if (target && target.readyState === WebSocket.OPEN && target !== ws) {
+            send(target, msg);
+            log('VOICE', `Relayed ${msg.type} from ${cs.role || '?'}`);
+          } else {
+            log('VOICE', `Cannot relay ${msg.type} — opponent not open (${target ? 'exists but closed' : 'null'})`);
+            send(ws, { type: 'error', message: 'Opponent not connected — voice signal not delivered' });
           }
         }
         break;
@@ -300,11 +474,16 @@ wss.on('connection', (ws, req) => {
         {
           const r = rooms.get(cs.roomCode);
           if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
-          const target = cs.role === 'host' ? r.guest : r.host;
+          const target = getOpponent(ws, r);
           if (msg.type === 'event' && msg.event === 'laughed') {
-            log('LAUGH', `sender=${cs.role}[${cs.playerId}] target=${cs.role === 'host' ? 'guest' : 'host'}[${cs.role === 'host' ? r.guestId : r.hostId}] same=${target === ws} room=${cs.roomCode}`);
+            log('LAUGH', `sender=${cs.role || '?'}[${cs.playerId}] room=${cs.roomCode}`);
           }
-          if (target && target.readyState === WebSocket.OPEN) send(target, msg);
+          if (target && target.readyState === WebSocket.OPEN && target !== ws) {
+            send(target, msg);
+          } else {
+            log('RELAY', `Cannot relay ${msg.type} from ${cs.role || '?'} — opponent not available`);
+            send(ws, { type: 'error', message: `Opponent not available — ${msg.type} not delivered` });
+          }
         }
         break;
 
@@ -312,26 +491,94 @@ wss.on('connection', (ws, req) => {
         {
           const r = rooms.get(cs.roomCode);
           if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
-          const target = cs.role === 'host' ? r.guest : r.host;
-          if (target && target.readyState === WebSocket.OPEN) send(target, msg);
+          const target = getOpponent(ws, r);
+          if (target && target.readyState === WebSocket.OPEN && target !== ws) send(target, msg);
         }
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
+    connectCount = Math.max(0, connectCount - 1);
+    const reasonStr = reason ? reason.toString().substring(0, 100) : '';
+    log('DISCONNECT', `Client ${cs.playerId || '?'} disconnected (code: ${code}, reason: ${reasonStr}) (rooms: ${rooms.size}, queue: ${matchmakingQueue.length})`);
     removeFromQueue(ws);
     cleanupRoom(ws);
     connStateMap.delete(ws);
-    log('DISCONNECT', `Client disconnected (rooms: ${rooms.size}, queue: ${matchmakingQueue.length})`);
   });
 
   ws.on('error', (err) => {
     log('ERROR', `WebSocket error for ${cs.playerId || '?'}: ${err.message}`);
+    removeFromQueue(ws);
+    cleanupRoom(ws);
+    connStateMap.delete(ws);
+    try { ws.terminate(); } catch (_) {}
+    connectCount = Math.max(0, connectCount - 1);
   });
+});
+
+const heartbeatTimer = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      log('HEARTBEAT', `Terminating zombie connection for ${connStateMap.get(ws)?.playerId || '?'}`);
+      removeFromQueue(ws);
+      cleanupRoom(ws);
+      connStateMap.delete(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  });
+}, HEARTBEAT_INTERVAL);
+
+const sweepTimer = setInterval(sweepGhostRooms, ROOM_SWEEP_INTERVAL);
+
+process.on('SIGTERM', () => {
+  shuttingDown = true;
+  log('SHUTDOWN', 'SIGTERM received — graceful shutdown');
+
+  wss.clients.forEach((ws) => {
+    send(ws, { type: 'server_shutdown', message: 'Server is restarting. Please reconnect in a few seconds.' });
+  });
+
+  clearInterval(heartbeatTimer);
+  clearInterval(sweepTimer);
+
+  setTimeout(() => {
+    wss.clients.forEach((ws) => { try { ws.terminate(); } catch (_) {} });
+    wss.close(() => {
+      httpServer.close(() => {
+        log('SHUTDOWN', 'Server closed');
+        process.exit(0);
+      });
+    });
+  }, 3000);
+});
+
+process.on('SIGINT', () => {
+  shuttingDown = true;
+  log('SHUTDOWN', 'SIGINT received — graceful shutdown');
+
+  wss.clients.forEach((ws) => {
+    send(ws, { type: 'server_shutdown', message: 'Server is shutting down.' });
+  });
+
+  clearInterval(heartbeatTimer);
+  clearInterval(sweepTimer);
+
+  setTimeout(() => {
+    wss.clients.forEach((ws) => { try { ws.terminate(); } catch (_) {} });
+    wss.close(() => {
+      httpServer.close(() => {
+        log('SHUTDOWN', 'Server closed');
+        process.exit(0);
+      });
+    });
+  }, 2000);
 });
 
 httpServer.listen(PORT, HOST, () => {
   log('START', `Server running on http://${HOST}:${PORT}`);
   log('START', `Health check: http://${HOST}:${PORT}/health`);
-  log('START', `Matchmaking: active (queue-based pairing)`);
+  log('START', `Matchmaking: active | Heartbeat: ${HEARTBEAT_INTERVAL/1000}s | Room sweep: ${ROOM_SWEEP_INTERVAL/1000}s`);
+  log('START', `Max connections: ${MAX_CONNECTIONS} | Max payload: ${MAX_PAYLOAD} bytes | Rate limit: ${MAX_MSG_PER_SEC} msg/s`);
 });

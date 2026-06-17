@@ -162,11 +162,15 @@ class MatchmakingService {
     required String roomCode,
     required VoidCallback onOpponentJoined,
     required void Function(String opponentId, String opponentName) onReady,
+    required VoidCallback onError,
   }) {
     cancelSearch();
     _currentRoomId = roomCode;
 
-    if (_db == null) return;
+    if (_db == null) {
+      onError();
+      return;
+    }
 
     _roomSub = _db!.collection(_collection).doc(roomCode).snapshots().listen((doc) {
       final data = doc.data();
@@ -176,6 +180,8 @@ class MatchmakingService {
       final guestName = data['player2Name'] as String?;
 
       if (status == 'playing' && guestId != null) {
+        _roomSub?.cancel();
+        _roomSub = null;
         onReady(guestId, (guestName ?? 'Player'));
       } else if (guestId != null && status != 'playing') {
         onOpponentJoined();
@@ -198,22 +204,27 @@ class MatchmakingService {
       if (query.docs.isEmpty) return false;
 
       final doc = query.docs.first;
-      final data = doc.data();
       final docId = doc.id;
 
-      if (data['status'] != 'waiting') return false;
-      if (data['player2Id'] != null) return false;
-
-      await roomsRef.doc(docId).update({
-        'player2Id': playerId,
-        'player2Name': playerName,
-        'player2Country': country,
-        'status': 'playing',
-        'matchedAt': FieldValue.serverTimestamp(),
+      final success = await _db!.runTransaction((tx) async {
+        final snap = await tx.get(roomsRef.doc(docId));
+        if (!snap.exists) return false;
+        final data = snap.data();
+        if (data == null) return false;
+        if (data['status'] != 'waiting') return false;
+        if (data['player2Id'] != null) return false;
+        tx.update(roomsRef.doc(docId), {
+          'player2Id': playerId,
+          'player2Name': playerName,
+          'player2Country': country,
+          'status': 'playing',
+          'matchedAt': FieldValue.serverTimestamp(),
+        });
+        return true;
       });
 
-      _currentRoomId = docId;
-      return true;
+      if (success) _currentRoomId = docId;
+      return success;
     } catch (e, s) {
       ErrorHandler.logError('Join room', e, s);
       return false;
@@ -308,6 +319,7 @@ class MatchmakingService {
     _roomSub = null;
     _isSearching = false;
     _onMatchFound = null;
+    _currentRoomId = null;
   }
 
   static String _generateCode() {
