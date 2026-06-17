@@ -57,6 +57,11 @@ class SmileDetector {
     _lastFpsReset = DateTime.now();
     _fpsCounter = 0;
     _frameLogCounter = 0;
+    _calibrationFrames = 0;
+    _baselineMouthW = 0.0;
+    _baselineCornerY = 0.0;
+    _baselineMouthOpen = 0.0;
+    _calibrated = false;
     debugPrint('[FACEMESH] Detector started (468-point mesh, option=faceMesh)');
   }
 
@@ -113,6 +118,14 @@ class SmileDetector {
 
   double _lastMouthW = 0.0;
   double _lastElev = 0.0;
+
+  // ── Adaptive baseline calibration ──────────────────────────
+  double _baselineMouthW = 0.0;
+  double _baselineCornerY = 0.0;
+  double _baselineMouthOpen = 0.0;
+  int _calibrationFrames = 0;
+  static const int _calibrationMaxFrames = 60;
+  bool _calibrated = false;
 
   double _computeSmileFromMesh(List<FaceMeshPoint> points, int frameNum) {
     if (points.isEmpty) return 0.0;
@@ -173,16 +186,36 @@ class SmileDetector {
     // ── 3. Mouth openness ──────────────────────────────────────
     final mouthOpen = _dist(upperLip!, lowerLip!) / (refW.clamp(1.0, 9999.0));
 
-    // ── 4. Composite smile score ───────────────────────────────
+    // ── 4. Adaptive calibration (first ~2 seconds) ────────────
+    if (!_calibrated && _calibrationFrames < _calibrationMaxFrames) {
+      _calibrationFrames++;
+      _baselineMouthW += mouthWratio;
+      _baselineCornerY += cornerRelY;
+      _baselineMouthOpen += mouthOpen;
+      if (_calibrationFrames == _calibrationMaxFrames) {
+        _baselineMouthW /= _calibrationMaxFrames;
+        _baselineCornerY /= _calibrationMaxFrames;
+        _baselineMouthOpen /= _calibrationMaxFrames;
+        _calibrated = true;
+        debugPrint('[FACEMESH] Calibration done: baselineMouthW=${_baselineMouthW.toStringAsFixed(3)} baselineCornerY=${_baselineCornerY.toStringAsFixed(3)} baselineMouthOpen=${_baselineMouthOpen.toStringAsFixed(3)}');
+      }
+      return 0.0;
+    }
+
+    // ── 5. Composite smile score (relative to personal baseline) ─
+    final wDeviation = mouthWratio - _baselineMouthW;
+    final elevDeviation = _baselineCornerY - cornerRelY;
+    final openDeviation = mouthOpen - _baselineMouthOpen;
+
     double smile = 0.0;
 
-    final wScore = ((mouthWratio - 0.38) / 0.14).clamp(0.0, 0.5);
+    final wScore = ((wDeviation) / 0.12).clamp(0.0, 0.45);
     smile += wScore;
 
-    final elevScore = ((0.65 - cornerRelY) / 0.15).clamp(0.0, 0.4);
+    final elevScore = ((elevDeviation) / 0.12).clamp(0.0, 0.35);
     smile += elevScore;
 
-    final openScore = ((mouthOpen - 0.015) / 0.05).clamp(0.0, 0.2);
+    final openScore = ((openDeviation) / 0.05).clamp(0.0, 0.2);
     smile += openScore;
 
     smile = smile.clamp(0.0, 1.0);
@@ -191,7 +224,7 @@ class SmileDetector {
     _lastElev = cornerRelY;
 
     if (frameNum % 30 == 0) {
-      debugPrint('[SMILE] F#$frameNum smile=${smile.toStringAsFixed(3)} | w=${mouthWratio.toStringAsFixed(3)}(s${wScore.toStringAsFixed(2)}) elev=${cornerRelY.toStringAsFixed(3)}(s${elevScore.toStringAsFixed(2)}) open=${mouthOpen.toStringAsFixed(3)}(s${openScore.toStringAsFixed(2)}) pts=${points.length}');
+      debugPrint('[SMILE] F#$frameNum smile=${smile.toStringAsFixed(3)} | w=${mouthWratio.toStringAsFixed(3)}(d${wDeviation.toStringAsFixed(3)} s${wScore.toStringAsFixed(2)}) elev=${cornerRelY.toStringAsFixed(3)}(d${elevDeviation.toStringAsFixed(3)} s${elevScore.toStringAsFixed(2)}) open=${mouthOpen.toStringAsFixed(3)}(d${openDeviation.toStringAsFixed(3)} s${openScore.toStringAsFixed(2)}) pts=${points.length}');
     }
 
     return smile;

@@ -184,6 +184,9 @@ function tryPair() {
       hostId: c1.playerId,
       guestId: c2.playerId,
       createdAt: Date.now(),
+      hostLaughTime: null,
+      guestLaughTime: null,
+      laughDecided: false,
     });
 
     send(p1, { type: 'matched', roomId: roomCode, opponentId: c2.playerId, opponentName: c2.playerName || 'Player', role: 'host' });
@@ -403,6 +406,7 @@ wss.on('connection', (ws, req) => {
         cs.playerName = msg.name || 'Host';
         rooms.set(cs.roomCode, {
           host: ws, guest: null, hostId: cs.playerId, guestId: null, createdAt: Date.now(),
+          hostLaughTime: null, guestLaughTime: null, laughDecided: false,
         });
         send(ws, { type: 'room_created', code: cs.roomCode });
         log('ROOM', `Created ${cs.roomCode} by host ${cs.playerName}`);
@@ -464,6 +468,60 @@ wss.on('connection', (ws, req) => {
           } else {
             log('VOICE', `Cannot relay ${msg.type} — opponent not open (${target ? 'exists but closed' : 'null'})`);
             send(ws, { type: 'error', message: 'Opponent not connected — voice signal not delivered' });
+          }
+        }
+        break;
+
+      case 'smile_laugh':
+        {
+          const r = rooms.get(cs.roomCode);
+          if (!r) { send(ws, { type: 'error', message: 'Not in a room' }); return; }
+          if (r.laughDecided) {
+            log('LAUGH', `Laugh already decided for room ${cs.roomCode} — ignoring`);
+            break;
+          }
+
+          const laughTime = msg.timestamp || Date.now();
+          const isHost = cs.role === 'host';
+
+          if (isHost) {
+            if (r.hostLaughTime) break;
+            r.hostLaughTime = laughTime;
+            log('LAUGH', `Host ${cs.playerId} laughed at ${laughTime}`);
+          } else {
+            if (r.guestLaughTime) break;
+            r.guestLaughTime = laughTime;
+            log('LAUGH', `Guest ${cs.playerId} laughed at ${laughTime}`);
+          }
+
+          const target = getOpponent(ws, r);
+          if (target && target.readyState === WebSocket.OPEN && target !== ws) {
+            send(target, msg);
+          }
+
+          const hostTime = r.hostLaughTime;
+          const guestTime = r.guestLaughTime;
+
+          if (hostTime && guestTime) {
+            const hostLost = hostTime < guestTime;
+            log('LAUGH', `Both laughed — host:${hostTime} guest:${guestTime} → ${hostLost ? 'host' : 'guest'} loses`);
+            if (r.host && r.host.readyState === WebSocket.OPEN) {
+              send(r.host, { type: 'event', event: hostLost ? 'you_lost' : 'you_won' });
+            }
+            if (r.guest && r.guest.readyState === WebSocket.OPEN) {
+              send(r.guest, { type: 'event', event: hostLost ? 'you_won' : 'you_lost' });
+            }
+            r.laughDecided = true;
+          } else {
+            const whoLaughed = hostTime ? 'host' : 'guest';
+            log('LAUGH', `Only ${whoLaughed} laughed — they lose`);
+            r.laughDecided = true;
+            if (r.host && r.host.readyState === WebSocket.OPEN) {
+              send(r.host, { type: 'event', event: hostTime ? 'you_lost' : 'you_won' });
+            }
+            if (r.guest && r.guest.readyState === WebSocket.OPEN) {
+              send(r.guest, { type: 'event', event: guestTime ? 'you_lost' : 'you_won' });
+            }
           }
         }
         break;

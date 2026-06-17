@@ -165,8 +165,18 @@ class VoiceChatService {
         }
       };
 
-      _pc!.onTrack = (event) {
-        debugPrint('[VOICE] Remote audio track received — playing');
+      _pc!.onTrack = (RTCTrackEvent event) {
+        debugPrint('[VOICE] Remote audio track received — streams: ${event.streams.length}, tracks: ${event.trackIds?.length ?? 0}');
+        if (event.streams.isNotEmpty) {
+          final remoteStream = event.streams.first;
+          final audioTracks = remoteStream.getAudioTracks();
+          debugPrint('[VOICE] Remote stream audio tracks: ${audioTracks.length}');
+          for (final t in audioTracks) {
+            debugPrint('[VOICE] Remote track: ${t.id} enabled=${t.enabled} muted=${t.muted}');
+          }
+
+        }
+        _setSpeakerOn();
       };
 
       _pc!.onIceConnectionState = (state) {
@@ -264,7 +274,7 @@ class VoiceChatService {
 
   static Future<void> _setSpeakerOn() async {
     try {
-      if (Platform.isAndroid) {
+      if (Platform.isAndroid || Platform.isIOS) {
         try {
           await _nativeChannel.invokeMethod('enableSpeakerphone');
           debugPrint('[VOICE] Speakerphone enabled via native');

@@ -533,6 +533,14 @@ class WsGameService {
     _send({'type': 'smile', 'value': value});
   }
 
+  static void sendLaugh(double value, int timestamp) {
+    _send({
+      'type': 'smile_laugh',
+      'smile': value,
+      'timestamp': timestamp,
+    });
+  }
+
   static void sendFace(String base64) {
     _send({'type': 'face', 'data': base64});
   }

@@ -67,9 +67,9 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
   int _smilesDetected = 0;
   int _framesProcessed = 0;
   int _consecutiveSmileFrames = 0;
-  static const int _requiredConsecutiveFrames = 2;
-  static const double _laughThreshold = 0.35;
-  static const double _smileResetThreshold = 0.20;
+  static const int _requiredConsecutiveFrames = 3;
+  static const double _laughThreshold = 0.22;
+  static const double _smileResetThreshold = 0.12;
 
   String _oppStatus = 'Ready';
   String? _oppFaceBase64;
@@ -276,14 +276,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
 
           if (_consecutiveSmileFrames >= _requiredConsecutiveFrames && !_iLaughed) {
             _iLaughed = true;
-            debugPrint('[SMILE] LAUGH TRIGGERED consecutive=$_consecutiveSmileFrames playerId=$_myId smile=${smile.toStringAsFixed(2)}');
+            final laughTime = DateTime.now().millisecondsSinceEpoch;
+            debugPrint('[SMILE] LAUGH TRIGGERED consecutive=$_consecutiveSmileFrames playerId=$_myId smile=${smile.toStringAsFixed(2)} time=$laughTime');
             if (widget.isLocal) {
               LocalGameService.sendGameEvent('laughed');
               _endGame(won: false, reason: 'player_laughed');
             } else if (widget.isWebSocket) {
-              WsGameService.sendGameEvent('laughed');
-              debugPrint('[EVENT] laughed event dispatched via WebSocket playerId=$_myId');
-              _endGame(won: false, reason: 'player_laughed');
+              WsGameService.sendLaugh(smile, laughTime);
+              debugPrint('[EVENT] smile_laugh dispatched via WebSocket playerId=$_myId time=$laughTime');
             } else if (widget.isFbOnline) {
               FbOnlineService.sendGameEvent('laughed');
               FbOnlineService.reportLaugh(playerId: _myId);
@@ -545,6 +545,14 @@ class _GameScreenState extends State<GameScreen> with WidgetsBindingObserver {
         } else if (evt != null && evt.startsWith('sound_')) {
           final soundIdx = int.tryParse(evt.substring(6)) ?? -1;
           if (soundIdx >= 0) GameSoundService.play(soundIdx);
+        }
+      } else if (type == 'smile_laugh') {
+        debugPrint('[CLIENT] Opponent smile_laugh received — opponent laughed!');
+        if (!_gameOver && !_iLaughed) {
+          debugPrint('[CLIENT] I have not laughed — I win!');
+          _endGame(won: true, reason: 'opponent_laughed');
+        } else if (!_gameOver && _iLaughed) {
+          debugPrint('[CLIENT] Both laughed — waiting for server verdict...');
         }
       }
     });
