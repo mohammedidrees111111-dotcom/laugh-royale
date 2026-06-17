@@ -12,6 +12,7 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
 
     private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -50,13 +51,12 @@ class MainActivity : FlutterActivity() {
                                     .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                                     .build()
-                                val focusRequest = AudioFocusRequest.Builder(
+                                audioFocusRequest = AudioFocusRequest.Builder(
                                     AudioManager.AUDIOFOCUS_GAIN
                                 )
                                     .setAudioAttributes(attrs)
-                                    .setWillPause(false)
                                     .build()
-                                am.requestAudioFocus(focusRequest)
+                                am.requestAudioFocus(audioFocusRequest!!)
                             }
                             result.success(true)
                         } else {
@@ -68,7 +68,10 @@ class MainActivity : FlutterActivity() {
                             it.isSpeakerphoneOn = false
                             it.mode = AudioManager.MODE_NORMAL
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                it.abandonAudioFocusRequest(null)
+                                audioFocusRequest?.let { req ->
+                                    it.abandonAudioFocusRequest(req)
+                                }
+                                audioFocusRequest = null
                             }
                         }
                         result.success(true)
