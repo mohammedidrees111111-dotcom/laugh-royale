@@ -166,7 +166,7 @@ class VoiceChatService {
       };
 
       _pc!.onTrack = (RTCTrackEvent event) {
-        debugPrint('[VOICE] Remote audio track received — streams: ${event.streams.length}, tracks: ${event.trackIds?.length ?? 0}');
+        debugPrint('[VOICE] Remote audio track received — streams: ${event.streams.length}, track: ${event.track.id} kind=${event.track.kind}');
         if (event.streams.isNotEmpty) {
           final remoteStream = event.streams.first;
           final audioTracks = remoteStream.getAudioTracks();
